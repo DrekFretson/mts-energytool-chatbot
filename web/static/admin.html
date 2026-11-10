@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>История сессий</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; margin: 24px auto; max-width: 960px; padding: 0 16px; color: #1d2023; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border-bottom: 1px solid #e2e4e8; padding: 6px 8px; text-align: left; }
+  button, input { font: inherit; padding: 6px 10px; }
+  pre { white-space: pre-wrap; background: #f4f5f7; padding: 12px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>История сессий</h1>
+<form id="auth">
+  <input id="token" type="password" required aria-label="Токен отладки" placeholder="Токен отладки">
+  <button>Показать</button> <span id="error" role="alert"></span>
+</form>
+<table><thead><tr><th>Создана</th><th>Сообщений</th><th>Заявка</th><th>ID</th></tr></thead><tbody id="rows"></tbody></table>
+<pre id="detail" hidden></pre>
+<script>
+const $ = (id) => document.getElementById(id);
+const when = (seconds) => new Date(seconds * 1000).toLocaleString("ru-RU");
+
+async function get(path) {
+  const response = await fetch(path, { headers: { "X-Debug-Token": $("token").value } });
+  if (!response.ok) throw new Error("Доступ запрещён");
+  return response.json();
+}
+
+async function show(id) {
+  const data = await get(`/api/admin/sessions/${id}`);
+  const lines = data.messages.map((m) => `${when(m.created_at)} ${m.role === "user" ? "Клиент" : "Бот"}: ${m.content}`);
+  if (data.lead) lines.push("", `ЗАЯВКА: ${data.lead.name}, ${data.lead.phone}, ${data.lead.company}`, data.lead.summary);
+  $("detail").textContent = lines.join("\n");
+  $("detail").hidden = false;
+}
+
+$("auth").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("error").textContent = "";
+  try {
+    const sessions = await get("/api/admin/sessions");
+    $("rows").replaceChildren(...sessions.map((s) => {
+      const row = document.createElement("tr");
+      const button = document.createElement("button");
+      button.textContent = s.id;
+      button.addEventListener("click", () => show(s.id));
+      for (const value of [when(s.created_at), s.messages, s.has_lead ? "да" : "нет"]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      const cell = document.createElement("td");
+      cell.append(button);
+      row.append(cell);
+      return row;
+    }));
+  } catch (error) {
+    $("error").textContent = error.message;
+  }
+});
+</script>
+</body>
+</html>

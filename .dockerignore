@@ -1,0 +1,9 @@
+drive-download-*
+data
+dist
+*.pdf
+*.md
+.env
+.git
+.venv
+__pycache__

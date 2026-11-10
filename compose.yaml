@@ -1,0 +1,37 @@
+services:
+  web:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://fake-llm:9000/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-not-needed}
+      LLM_MODEL: ${LLM_MODEL:-qwen/qwen3.8-27b}
+      EMB_MODEL: ${EMB_MODEL:-baai/bge-m3}
+      RERANKER_MODEL: ${RERANKER_MODEL:-qwen/qwen3-reranker-8b}
+      DEBUG_TOKEN: ${DEBUG_TOKEN:-}
+      DB_PATH: /data/app.sqlite
+      KB_PATH: /kb/knowledge-base.zip
+    volumes:
+      - ./data/knowledge-base.zip:/kb/knowledge-base.zip:ro
+      - app-data:/data
+    depends_on:
+      fake-llm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  fake-llm:
+    build: .
+    command: ["python", "tests/fake_llm.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9000), 2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  app-data:

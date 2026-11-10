@@ -1,0 +1,10 @@
+# Материалы кейса нельзя публиковать
+drive-download-*/
+data/
+*.pdf
+
+.env
+dist/
+submission.csv*
+__pycache__/
+.venv/
