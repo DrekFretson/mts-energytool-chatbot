@@ -112,9 +112,10 @@ def load_chunks(zip_path):
             if name.startswith("__MACOSX/") or PurePosixPath(name).suffix.lower() not in (".md", ".txt"):
                 continue
             text = archive.read(name).decode("utf-8-sig", errors="replace")
-            for crumb, content in split_sections(name, text):
+            for section, (crumb, content) in enumerate(split_sections(name, text), start=len(chunks)):
+                # section: номер раздела, общий для его кусков; растёт по порядку документа.
                 for piece in _split_long(content, config.MAX_CHUNK_CHARS):
-                    chunks.append({"id": len(chunks), "file": name, "crumb": crumb, "text": piece})
+                    chunks.append({"id": len(chunks), "section": section, "file": name, "crumb": crumb, "text": piece})
     if not chunks:
         raise ValueError("В базе знаний нет файлов .md или .txt")
     return chunks

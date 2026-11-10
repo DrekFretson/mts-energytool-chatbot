@@ -7,7 +7,10 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://fake-llm:9000/v1}
       LLM_API_KEY: ${LLM_API_KEY:-not-needed}
       LLM_MODEL: ${LLM_MODEL:-qwen/qwen3.8-27b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
       EMB_MODEL: ${EMB_MODEL:-baai/bge-m3}
+      EMB_BASE_URL: ${EMB_BASE_URL:-}
+      EMB_API_KEY: ${EMB_API_KEY:-}
       RERANKER_MODEL: ${RERANKER_MODEL:-qwen/qwen3-reranker-8b}
       DEBUG_TOKEN: ${DEBUG_TOKEN:-}
       DB_PATH: /data/app.sqlite

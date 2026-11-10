@@ -50,6 +50,8 @@ tests/      автотесты и заглушка LLM
 |---|---|
 | `LLM_BASE_URL`, `LLM_API_KEY` | OpenAI-совместимый сервер и ключ |
 | `LLM_MODEL`, `EMB_MODEL`, `RERANKER_MODEL` | Идентификаторы моделей |
+| `LLM_PROVIDER` | Только для OpenRouter: фиксированный провайдер, например `deepinfra/bf16` |
+| `EMB_BASE_URL`, `EMB_API_KEY` | Отдельный сервер эмбеддингов; по умолчанию `LLM_BASE_URL` и его ключ |
 | `DEBUG_TOKEN` | Доступ к отладке и `/admin`; пустой значит отключено |
 | `DB_PATH`, `KB_PATH` | SQLite и архив базы знаний |
 | `PORT` | Порт на хосте, по умолчанию 8000 |

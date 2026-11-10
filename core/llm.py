@@ -21,24 +21,30 @@ def _env(*names, default=""):
 
 BASE_URL = _env("LLM_BASE_URL", "BASE_URL", "OPENAI_BASE_URL").rstrip("/")
 API_KEY = _env("LLM_API_KEY", "OPENAI_API_KEY", default="not-needed")
+# На платформе один прокси на всё; на стенде генерация по API, а bge-m3 локально.
+EMB_BASE_URL = _env("EMB_BASE_URL", default=BASE_URL).rstrip("/")
+EMB_API_KEY = _env("EMB_API_KEY", "EMBEDDER_API_KEY", default=API_KEY)
 MODEL = _env("LLM_MODEL", "GEN_MODEL", "OPENAI_MODEL", default="qwen/qwen3.8-27b")
 EMB_MODEL = _env("EMB_MODEL", default="baai/bge-m3")
 RERANKER_MODEL = _env("RERANKER_MODEL", default="qwen/qwen3-reranker-8b")
 MAX_TOKENS = int(_env("MAX_TOKENS", default="2048"))
+# Только для стенда на OpenRouter: провайдеры отличаются квантизацией, фиксируем один, например deepinfra/bf16.
+LLM_PROVIDER = _env("LLM_PROVIDER")
 
 THINK = re.compile(r"<think>.*?(</think>|$)", re.S)
 _client = httpx.Client(timeout=config.LLM_TIMEOUT)
 _thinking_flag_accepted = True
 
 
-def _post(path, body, timeout=None, attempts=3):
-    if not BASE_URL:
+def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
+    base_url = base_url or BASE_URL
+    if not base_url:
         raise RuntimeError("Не задан LLM_BASE_URL")
     for attempt in range(attempts):
         try:
             response = _client.post(
-                BASE_URL + path,
-                headers={"Authorization": f"Bearer {API_KEY}"},
+                base_url + path,
+                headers={"Authorization": f"Bearer {api_key or API_KEY}"},
                 json=body,
                 timeout=timeout or config.LLM_TIMEOUT,
             )
@@ -55,16 +61,27 @@ def _post(path, body, timeout=None, attempts=3):
             time.sleep(2**attempt)
 
 
-def chat(messages, max_tokens=None):
-    global _thinking_flag_accepted
+def chat_body(messages, max_tokens=None):
     body = {
         "model": MODEL,
         "messages": messages,
         "temperature": config.TEMPERATURE,
         "max_tokens": max_tokens or config.MAX_ANSWER_TOKENS,
     }
-    if config.THINKING_OFF and _thinking_flag_accepted:
+    openrouter = "openrouter.ai" in BASE_URL
+    if config.THINKING_OFF and openrouter:
+        # OpenRouter игнорирует chat_template_kwargs (проверено 11.11), thinking выключает только reasoning.
+        body["reasoning"] = {"enabled": False}
+    elif config.THINKING_OFF and _thinking_flag_accepted:
         body["chat_template_kwargs"] = {"enable_thinking": False}
+    if openrouter and LLM_PROVIDER:
+        body["provider"] = {"order": LLM_PROVIDER.split(","), "allow_fallbacks": False}
+    return body
+
+
+def chat(messages, max_tokens=None):
+    global _thinking_flag_accepted
+    body = chat_body(messages, max_tokens)
     try:
         result = _post("/chat/completions", body)
     except httpx.HTTPStatusError as exc:
@@ -89,7 +106,7 @@ def embed(texts, batch_size=32):
     vectors = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
-        data = _post("/embeddings", {"model": EMB_MODEL, "input": batch})["data"]
+        data = _post("/embeddings", {"model": EMB_MODEL, "input": batch}, base_url=EMB_BASE_URL, api_key=EMB_API_KEY)["data"]
         ordered = sorted(enumerate(data), key=lambda pair: pair[1].get("index", pair[0]))
         vectors.extend(item["embedding"] for _, item in ordered)
     matrix = np.asarray(vectors, dtype=np.float32)

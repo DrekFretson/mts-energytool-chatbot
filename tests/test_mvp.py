@@ -94,6 +94,120 @@ class Parsing(unittest.TestCase):
         self.assertEqual(pipeline.parse_dialog("Просто вопрос"), [{"role": "user", "content": "Просто вопрос"}])
 
 
+GUARDED = """# Продукт А
+
+## Что это
+
+Платформа учёта для складов.
+
+## Цены
+
+Подключение склада от 50 000 рублей.
+
+## Факты, которые можно утверждать
+
+Минимального числа приборов нет.
+
+## Чего утверждать нельзя
+
+Нельзя обещать экономию.
+"""
+
+OTHER = """# Продукт Б
+
+## Что это
+
+Солнечные станции на крышах.
+
+## Чего утверждать нельзя
+
+Нельзя обещать автономность.
+"""
+
+
+class Context(unittest.TestCase):
+    def setUp(self):
+        import config
+        import retrieval
+
+        self.config = config
+        self.saved = config.CONTEXT_CHARS
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work, "kb.zip")
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("a.md", GUARDED)
+                archive.writestr("b.md", OTHER)
+            self.index = retrieval.Index(kb.load_chunks(path))
+
+    def tearDown(self):
+        self.config.CONTEXT_CHARS = self.saved
+
+    def crumbs(self, query):
+        return [s["crumb"] for s in self.index.context(self.index.search(query))]
+
+    def test_guards_follow_their_document(self):
+        crumbs = self.crumbs("цены подключение склада")
+        self.assertIn("Продукт А > Цены", crumbs)
+        self.assertIn("Продукт А > Чего утверждать нельзя", crumbs)
+        self.assertIn("Продукт А > Факты, которые можно утверждать", crumbs)
+        # Разделы одного документа идут подряд в его порядке.
+        a = [c for c in crumbs if c.startswith("Продукт А")]
+        self.assertEqual(crumbs[: len(a)], a)
+        self.assertEqual(a, sorted(a, key=lambda crumb: GUARDED.index("## " + crumb.split(" > ")[-1])))
+
+    def test_budget_is_respected_and_sections_are_whole(self):
+        self.config.CONTEXT_CHARS = 60
+        sections = self.index.context(self.index.search("цены подключение склада"))
+        self.assertLessEqual(sum(len(s["text"]) for s in sections), 60)
+        self.assertTrue(all(s["text"] in GUARDED + OTHER for s in sections))
+
+    @unittest.skipUnless(REAL_KB.exists(), "нет data/knowledge-base.zip")
+    def test_real_kb_long_section_is_whole(self):
+        import retrieval
+
+        index = retrieval.Index(kb.load_chunks(REAL_KB))
+        sections = index.context(index.search("Сколько стоит солнечная станция и как считается эффект"))
+        self.assertLessEqual(sum(len(s["text"]) for s in sections), self.config.CONTEXT_CHARS)
+        effect = [s for s in sections if s["crumb"].endswith("Как считается эффект")]
+        if effect:
+            self.assertGreater(len(effect[0]["text"]), 1500)
+
+
+class Routing(unittest.TestCase):
+    def test_embeddings_use_own_url(self):
+        import httpx
+        import llm
+
+        original = llm.EMB_BASE_URL
+        llm.EMB_BASE_URL = "http://127.0.0.1:9/v1"
+        try:
+            with self.assertRaises(httpx.TransportError):
+                llm.embed(["текст"])
+            self.assertIn("fake-llm", llm.chat([{"role": "user", "content": "вопрос"}]))
+        finally:
+            llm.EMB_BASE_URL = original
+        self.assertEqual(llm.embed(["текст"]).shape[0], 1)
+
+    def test_thinking_switch_depends_on_endpoint(self):
+        import llm
+
+        messages = [{"role": "user", "content": "вопрос"}]
+        platform = llm.chat_body(messages)
+        self.assertEqual(platform["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertNotIn("reasoning", platform)
+        self.assertNotIn("provider", platform)
+
+        saved = llm.BASE_URL, llm.LLM_PROVIDER
+        llm.BASE_URL, llm.LLM_PROVIDER = "https://openrouter.ai/api/v1", "deepinfra/bf16"
+        try:
+            stand = llm.chat_body(messages)
+        finally:
+            llm.BASE_URL, llm.LLM_PROVIDER = saved
+        self.assertEqual(stand["reasoning"], {"enabled": False})
+        self.assertNotIn("chat_template_kwargs", stand)
+        self.assertEqual(stand["provider"], {"order": ["deepinfra/bf16"], "allow_fallbacks": False})
+
+
 class Submission(unittest.TestCase):
     def run_solution(self, code, extra_env=None, llm_url=BASE_URL):
         with tempfile.TemporaryDirectory() as work:

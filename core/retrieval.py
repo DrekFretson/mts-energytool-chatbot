@@ -70,4 +70,47 @@ class Index:
         order = [int(i) for i in np.argsort(-scores)[: config.CANDIDATES]]
         if config.USE_RERANK:
             order = self._rerank(query, order)
-        return [{**self.chunks[i], "score": round(float(scores[i]), 4)} for i in order[: config.TOP_K]]
+        return [{**self.chunks[i], "score": round(float(scores[i]), 4)} for i in order]
+
+    def context(self, hits):
+        """Найденные куски -> разделы целиком по рангу, пока влезают в CONTEXT_CHARS.
+
+        С первым разделом документа сразу берутся его защитные разделы: оговорки и запреты
+        должны идти вместе с фактами, иначе модель отдаёт число без условия.
+        """
+        sections = {}
+        for chunk in self.chunks:
+            section = sections.setdefault(chunk["section"], {"file": chunk["file"], "crumb": chunk["crumb"], "parts": []})
+            section["parts"].append(chunk["text"])
+        guards = {}
+        for number, section in sections.items():
+            if section["crumb"].rsplit(" > ", 1)[-1] in config.GUARD_HEADINGS:
+                guards.setdefault(section["file"], []).append(number)
+
+        chosen, score, used = [], {}, 0
+
+        def take(number, hit_score):
+            nonlocal used
+            if number in chosen:
+                return
+            size = sum(len(part) for part in sections[number]["parts"])
+            if used + size <= config.CONTEXT_CHARS:
+                chosen.append(number)
+                score[number] = hit_score
+                used += size
+
+        for hit in hits:
+            new_file = all(sections[n]["file"] != hit["file"] for n in chosen)
+            take(hit["section"], hit["score"])
+            if new_file and hit["section"] in chosen:
+                for number in guards.get(hit["file"], []):
+                    take(number, None)
+
+        file_rank = {}
+        for number in chosen:
+            file_rank.setdefault(sections[number]["file"], len(file_rank))
+        # В промпте разделы одного документа идут подряд и в его порядке, так легче читать связи.
+        return [
+            {"file": sections[n]["file"], "crumb": sections[n]["crumb"], "text": "\n".join(sections[n]["parts"]), "score": score[n]}
+            for n in sorted(chosen, key=lambda n: (file_rank[sections[n]["file"]], n))
+        ]

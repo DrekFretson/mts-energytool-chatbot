@@ -3,6 +3,7 @@
 import re
 import time
 
+import config
 import llm
 import prompts
 
@@ -32,6 +33,7 @@ def answer(index, history):
     past = [turn["content"] for turn in history[:-1] if turn["role"] == "user"]
 
     hits = index.search(question, past)
+    hits = index.context(hits) if config.WHOLE_SECTIONS else hits[: config.TOP_K]
     searched = time.perf_counter()
 
     materials = "\n\n".join(f"[{hit['crumb']}]\n{hit['text']}" for hit in hits)

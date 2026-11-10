@@ -4,11 +4,16 @@ MAX_CHUNK_CHARS = 1500  # bge-m3 видит ~512 токенов, длиннее 
 
 TOP_K = 5
 CANDIDATES = 20
+# T4: разделы целиком до CONTEXT_CHARS + защитные разделы документов. На платформе 42.5 против ~50:
+# контекст набивался 7-11 документами. Выключено; код оставлен для T5 (узкий контекст).
+WHOLE_SECTIONS = False
+CONTEXT_CHARS = 14000
+GUARD_HEADINGS = ("Факты, которые можно утверждать", "Чего утверждать нельзя")
 DENSE_WEIGHT = 0.85
 HISTORY_WEIGHT_DENSE = 0.3
 HISTORY_WEIGHT_BM25 = 0.5
 
-USE_RERANK = True
+USE_RERANK = False  # T2: ничья по баллу и времени, лишний внешний вызов не нужен
 RERANK_TIMEOUT = 3.0
 
 THINKING_OFF = True
