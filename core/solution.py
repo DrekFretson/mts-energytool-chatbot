@@ -41,11 +41,26 @@ def main():
     answers = {qid: config.FALLBACK_ANSWER for qid in questions}
     write_csv(answers)
 
+    try:
+        if config.REASONING_EFFORT != "none" or llm.probe():
+            # Модель рассуждает: без запаса токенов и времени ответы обрезаются и уходят в запасной текст.
+            config.MAX_ANSWER_TOKENS = llm.MAX_TOKENS = max(llm.MAX_TOKENS, config.REASONING_MAX_TOKENS)
+            config.LLM_TIMEOUT = config.REASONING_TIMEOUT
+            print("Режим с рассуждениями: лимит токенов и тайм-аут увеличены", flush=True)
+    except Exception as exc:
+        print(f"Проба LLM не удалась: {type(exc).__name__}", file=sys.stderr, flush=True)
+
     index = retrieval.Index(kb.load_chunks(find_file("knowledge-base.zip", "knowledge_base.zip", "kb.zip")))
     print(f"Вопросов: {len(questions)}; фрагментов: {len(index.chunks)}; "
           f"индекс: {time.monotonic() - started:.1f} с", flush=True)
 
+    finished = []
+
     def work(qid, question):
+        elapsed = time.monotonic() - started
+        if finished and elapsed + (len(questions) - len(finished)) * elapsed / len(finished) > config.REASONING_UNTIL_SEC:
+            # Прогноз по уже готовым ответам не укладывается в лимит: дальше отвечаем без рассуждений.
+            llm.reasoning_off()
         try:
             return qid, pipeline.answer(index, pipeline.parse_dialog(question))["text"]
         except Exception as exc:
@@ -59,6 +74,7 @@ def main():
     try:
         for future in cf.as_completed(futures, timeout=max(1, config.DEADLINE_SEC - (time.monotonic() - started))):
             qid, text = future.result()
+            finished.append(qid)
             if text:
                 answers[qid] = text[:MAX_ANSWER_CHARS]
                 done += 1

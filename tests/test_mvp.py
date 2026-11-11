@@ -188,13 +188,15 @@ class Routing(unittest.TestCase):
             llm.EMB_BASE_URL = original
         self.assertEqual(llm.embed(["текст"]).shape[0], 1)
 
-    def test_thinking_switch_depends_on_endpoint(self):
+    def test_reasoning_switches_go_to_any_endpoint_provider_only_to_openrouter(self):
         import llm
 
         messages = [{"role": "user", "content": "вопрос"}]
         platform = llm.chat_body(messages)
+        # Какое поле понимает прокси платформы, неизвестно: шлём все, отвергнутое убирает _post_chat.
         self.assertEqual(platform["chat_template_kwargs"], {"enable_thinking": False})
-        self.assertNotIn("reasoning", platform)
+        self.assertEqual(platform["reasoning"], {"effort": "none"})
+        self.assertEqual(platform["reasoning_effort"], "none")
         self.assertNotIn("provider", platform)
 
         saved = llm.BASE_URL, llm.LLM_PROVIDER
@@ -203,8 +205,7 @@ class Routing(unittest.TestCase):
             stand = llm.chat_body(messages)
         finally:
             llm.BASE_URL, llm.LLM_PROVIDER = saved
-        self.assertEqual(stand["reasoning"], {"enabled": False})
-        self.assertNotIn("chat_template_kwargs", stand)
+        self.assertEqual(stand["reasoning"], {"effort": "none"})
         self.assertEqual(stand["provider"], {"order": ["deepinfra/bf16"], "allow_fallbacks": False})
 
 

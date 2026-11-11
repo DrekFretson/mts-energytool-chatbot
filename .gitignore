@@ -9,3 +9,7 @@ submission.csv*
 __pycache__/
 .venv/
 eval/set/knowledge-base.zip
+
+# Рабочие материалы агентов и данные кейса
+agent-dump/
+artefacts/

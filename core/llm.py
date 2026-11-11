@@ -32,8 +32,15 @@ MAX_TOKENS = int(_env("MAX_TOKENS", default="2048"))
 LLM_PROVIDER = _env("LLM_PROVIDER")
 
 THINK = re.compile(r"<think>.*?(</think>|$)", re.S)
+# Шаблоны Qwen3.5+ кладут "<think>" в промпт: без парсера ответ приходит как "рассуждение</think>ответ".
+THINK_TAIL = re.compile(r"^.*?</think>", re.S)
 _client = httpx.Client(timeout=config.LLM_TIMEOUT)
-_thinking_flag_accepted = True
+# Прокси управляют рассуждениями разными полями (OpenRouter, OpenAI, шаблон Qwen); отвергнутое поле убираем.
+_reasoning = {
+    "reasoning": {"effort": config.REASONING_EFFORT},
+    "reasoning_effort": config.REASONING_EFFORT,
+    "chat_template_kwargs": {"enable_thinking": config.REASONING_EFFORT != "none"},
+}
 
 
 def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
@@ -67,39 +74,87 @@ def chat_body(messages, max_tokens=None):
         "messages": messages,
         "temperature": config.TEMPERATURE,
         "max_tokens": max_tokens or config.MAX_ANSWER_TOKENS,
+        **_reasoning,
     }
-    openrouter = "openrouter.ai" in BASE_URL
-    if config.THINKING_OFF and openrouter:
-        # OpenRouter игнорирует chat_template_kwargs (проверено 11.11), thinking выключает только reasoning.
-        body["reasoning"] = {"enabled": False}
-    elif config.THINKING_OFF and _thinking_flag_accepted:
-        body["chat_template_kwargs"] = {"enable_thinking": False}
-    if openrouter and LLM_PROVIDER:
+    if "openrouter.ai" in BASE_URL and LLM_PROVIDER:
         body["provider"] = {"order": LLM_PROVIDER.split(","), "allow_fallbacks": False}
     return body
 
 
-def chat(messages, max_tokens=None):
-    global _thinking_flag_accepted
-    body = chat_body(messages, max_tokens)
-    try:
-        result = _post("/chat/completions", body)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 400 or "chat_template_kwargs" not in body:
-            raise
-        _thinking_flag_accepted = False
-        del body["chat_template_kwargs"]
-        result = _post("/chat/completions", body)
+_limits = {}  # потолок max_tokens, который принял прокси (узнаём по отказу)
+_OFF = {"reasoning": {"effort": "none"}, "reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}}
 
-    text = THINK.sub("", result["choices"][0]["message"].get("content") or "").strip()
-    if not text and body["max_tokens"] < MAX_TOKENS:
-        # Рассуждения съели весь лимит: повторяем один раз с запасом.
+
+def _post_chat(body):
+    while True:
+        if "max_tokens" in _limits:
+            body["max_tokens"] = min(body["max_tokens"], _limits["max_tokens"])
+        try:
+            # Один повтор: зависший на рассуждениях запрос иначе держит вопрос три тайм-аута подряд.
+            return _post("/chat/completions", body, attempts=2)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (400, 422) and "max_tokens" in exc.response.text and body["max_tokens"] > 512:
+                # Прокси ограничивает длину ответа: уменьшаем лимит и запоминаем, а не теряем поля рассуждений.
+                _limits["max_tokens"] = body["max_tokens"] // 2
+                continue
+            sent = [key for key in _reasoning if key in body]
+            if exc.response.status_code not in (400, 422) or not sent:
+                raise
+            named = [key for key in sent if key in exc.response.text]
+            for key in named or sent[:1]:
+                _reasoning.pop(key, None)
+                body.pop(key)
+
+
+def _answer(result):
+    choice = result["choices"][0]
+    content = choice["message"].get("content") or ""
+    return THINK_TAIL.sub("", THINK.sub("", content)).strip(), choice.get("finish_reason") == "length"
+
+
+def thinks(result):
+    """Признаки рассуждений в ответе прокси: отдельное поле, счётчик токенов или расход много больше видимого текста."""
+    message, usage = result["choices"][0]["message"], result.get("usage") or {}
+    content = message.get("content") or ""
+    details = usage.get("completion_tokens_details") or {}
+    return bool(
+        not content.strip()
+        or message.get("reasoning")
+        or message.get("reasoning_content")
+        or details.get("reasoning_tokens")
+        or "</think>" in content
+        or usage.get("completion_tokens", 0) > 2 * (len(content) / 3 + 20)
+    )
+
+
+def chat(messages, max_tokens=None):
+    body = chat_body(messages, max_tokens)
+    text, cut = _answer(_post_chat(body))
+    if (not text or cut) and body["max_tokens"] < MAX_TOKENS:
+        # Рассуждения или длина съели лимит: повторяем один раз с запасом.
         body["max_tokens"] = MAX_TOKENS
-        result = _post("/chat/completions", body)
-        text = THINK.sub("", result["choices"][0]["message"].get("content") or "").strip()
-    if not text:
-        raise ValueError("LLM вернула пустой ответ")
+        text, cut = _answer(_post_chat(body))
+    if (not text or cut) and any(body.get(key) != value for key, value in _OFF.items() if key in body):
+        # Рассуждения не уложились в лимит: последний шанс - тот же запрос без рассуждений, а не заглушка.
+        body.update({key: _OFF[key] for key in body if key in _OFF})
+        body["max_tokens"] = config.MAX_ANSWER_TOKENS_OFF
+        text, cut = _answer(_post_chat(body))
+    if not text or cut:
+        # Обрезанный текст - это рассуждение без тегов или половина фразы, а не ответ.
+        raise ValueError("LLM вернула пустой или обрезанный ответ")
     return text
+
+
+def reasoning_off():
+    """Выключить рассуждения для оставшихся вопросов: страховка по времени прогона."""
+    for key in _reasoning:
+        _reasoning[key] = _OFF[key]
+
+
+def probe():
+    """Короткий запрос на старте: True, если модель рассуждает. Заодно отсеивает поля, которые прокси отвергает."""
+    body = chat_body([{"role": "user", "content": "Ответь одним словом: да"}], max_tokens=64)
+    return thinks(_post_chat(body))
 
 
 def embed(texts, batch_size=32):
