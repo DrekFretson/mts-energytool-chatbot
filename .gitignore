@@ -13,3 +13,6 @@ eval/set/knowledge-base.zip
 # Рабочие материалы агентов и данные кейса
 agent-dump/
 artefacts/
+knowledge-base/
+research-notes.zip
+*.patch

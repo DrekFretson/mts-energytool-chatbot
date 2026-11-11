@@ -81,15 +81,24 @@ def _split_long(text, limit):
     return parts
 
 
+def dashes(text):
+    """Тире из pandoc-записи: '5--15%' -> '5–15%', 'диапазон --- 15' -> 'диапазон — 15'.
+
+    Дефисы в словах и маркеры списков '- ' не трогаются. Вызывать после разбора таблиц:
+    строки-рамки из дефисов распознаются до замены.
+    """
+    return text.replace("---", "—").replace("--", "–")
+
+
 def split_sections(name, text):
     """Режет по H1-H3. Крошка H1 > H2 > H3 различает одинаковые разделы "Чего утверждать нельзя"."""
     path, body, sections = {}, [], []
 
     def flush():
-        content = "\n".join(body).strip()
+        content = dashes("\n".join(body).strip())
         body.clear()
         if content:
-            crumb = " > ".join(path[level] for level in sorted(path)) or PurePosixPath(name).stem
+            crumb = dashes(" > ".join(path[level] for level in sorted(path)) or PurePosixPath(name).stem)
             sections.append((crumb, content))
 
     for line in normalize_tables(text).split("\n"):

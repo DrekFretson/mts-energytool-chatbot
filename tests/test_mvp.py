@@ -89,6 +89,11 @@ class Parsing(unittest.TestCase):
         joined = "\n".join(c["text"] for c in kb.load_chunks(REAL_KB))
         self.assertRegex(joined, r"Порог доступа к оптовому рынку; Значение: 750 кВт присоединённой мощности; Оговорка: Ниже порога")
 
+    def test_pandoc_dashes_become_real_dashes(self):
+        text = "# Док\n\n## Раздел\n\nДиапазон --- 15--500 кВт для компании-посредника.\n\n- пункт списка\n\n-----\n"
+        (crumb, content), = kb.split_sections("doc.md", text)
+        self.assertEqual(content, "Диапазон — 15–500 кВт для компании-посредника.\n\n- пункт списка")
+
     def test_parse_dialog(self):
         history = pipeline.parse_dialog("Пользователь: А\nстрока\nАссистент: Б\nПользователь: В")
         self.assertEqual([t["role"] for t in history], ["user", "assistant", "user"])
