@@ -140,10 +140,20 @@ class Index:
         for number, section in sections.items():
             by_file.setdefault(section["file"], []).append(number)
 
+        # Целиком идут документы с лучшей оценкой поиска, остальные - только найденными разделами.
+        # 0 - без ограничения: любой найденный документ тянется целиком, пока хватает бюджета.
+        whole_files = None
+        if config.WHOLE_DOCUMENTS_LIMIT:
+            best = {}
+            for hit in hits:
+                best[hit["file"]] = max(best.get(hit["file"], hit["score"]), hit["score"])
+            whole_files = set(sorted(best, key=best.get, reverse=True)[: config.WHOLE_DOCUMENTS_LIMIT])
+
         for hit in hits:
             new_file = all(sections[n]["file"] != hit["file"] for n in chosen)
             rest = [n for n in by_file[hit["file"]] if n not in chosen]
-            if config.WHOLE_DOCUMENTS and used + sum(len(part) for n in rest for part in sections[n]["parts"]) <= config.CONTEXT_CHARS:
+            whole = config.WHOLE_DOCUMENTS and (whole_files is None or hit["file"] in whole_files)
+            if whole and used + sum(len(part) for n in rest for part in sections[n]["parts"]) <= config.CONTEXT_CHARS:
                 for number in rest:
                     take(number, hit["score"])
             take(hit["section"], hit["score"])

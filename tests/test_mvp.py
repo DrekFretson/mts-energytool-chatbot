@@ -158,6 +158,19 @@ class Context(unittest.TestCase):
     def crumbs(self, query):
         return [s["crumb"] for s in self.index.context(self.index.search(query))]
 
+    def test_whole_documents_limit_keeps_others_as_found_sections(self):
+        saved = self.config.WHOLE_DOCUMENTS, self.config.WHOLE_DOCUMENTS_LIMIT
+        self.config.WHOLE_DOCUMENTS, self.config.WHOLE_DOCUMENTS_LIMIT, self.config.CONTEXT_CHARS = True, 1, 100000
+        by_crumb = {c["crumb"]: c for c in self.index.chunks}
+        # Документ Б найден раньше, но с худшей оценкой: целиком должен идти А.
+        hits = [{**by_crumb["Продукт Б > Что это"], "score": 0.4}, {**by_crumb["Продукт А > Цены"], "score": 0.9}]
+        try:
+            crumbs = [s["crumb"] for s in self.index.context(hits)]
+        finally:
+            self.config.WHOLE_DOCUMENTS, self.config.WHOLE_DOCUMENTS_LIMIT = saved
+        self.assertEqual(sum(c.startswith("Продукт А") for c in crumbs), 4)
+        self.assertEqual([c for c in crumbs if c.startswith("Продукт Б")], ["Продукт Б > Что это"])
+
     def test_guards_follow_their_document(self):
         crumbs = self.crumbs("цены подключение склада")
         self.assertIn("Продукт А > Цены", crumbs)
