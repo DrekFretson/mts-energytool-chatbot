@@ -40,12 +40,14 @@ def answer(index, history, note=""):
     question = history[-1]["content"]
     past = [turn["content"] for turn in history[:-1] if turn["role"] == "user"]
 
-    hits = index.search(question, past)
+    recent = "\n".join(f"{'Клиент' if turn['role'] == 'user' else 'Консультант'}: {turn['content']}" for turn in history[-4:])
+    hits = index.search(question, past, recent)
     hits = index.context(hits) if config.WHOLE_SECTIONS else hits[: config.TOP_K]
     searched = time.perf_counter()
 
     materials = "\n\n".join(f"[{number}] {hit['crumb']}\n{hit['text']}" for number, hit in enumerate(hits, 1))
-    messages = history[:-1] + [{"role": "user", "content": prompts.user_turn(materials, question)}]
+    recap = recent.rsplit("\n", 1)[0] if config.DIALOG_RECAP and len(history) > 1 else ""
+    messages = history[:-1] + [{"role": "user", "content": prompts.user_turn(materials, question, recap)}]
     system = f"{prompts.SYSTEM}\n\n{note}" if note else prompts.SYSTEM
     text = _clean(llm.chat([{"role": "system", "content": system}] + messages))
     finished = time.perf_counter()

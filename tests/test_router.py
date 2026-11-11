@@ -21,7 +21,7 @@ HISTORY = [{"role": "user", "content": "Позовите менеджера"}]
 
 
 class FakeIndex:
-    def search(self, query, past=()):
+    def search(self, query, past=(), dialog=""):
         return [{"file": "a.md", "crumb": "A > B", "text": "Порог 750 кВт.", "score": 1.0}]
 
     def context(self, hits):

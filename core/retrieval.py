@@ -75,7 +75,8 @@ class Index:
             fused[order[r]] += 1 / (60 + position)
         return sorted(order, key=fused.get, reverse=True)
 
-    def search(self, query, past=()):
+    def search(self, query, past=(), dialog=""):
+        """dialog - последние реплики беседы для реранкера: по одной реплике он не понимает, о чём уточняющий вопрос."""
         past = list(past)
         lexical = self._lexical(query, past)
         scores, dense = lexical, None
@@ -92,7 +93,7 @@ class Index:
                     self._dense_paused_until = time.monotonic() + DENSE_PAUSE_SEC
         order = [int(i) for i in np.argsort(-scores)[: config.CANDIDATES]]
         if config.USE_RERANK:
-            order = self._rerank(query, order)
+            order = self._rerank(dialog or query, order)
         if dense is not None:
             order = self._aspect_first(dense, order)
         return [{**self.chunks[i], "score": round(float(scores[i]), 4)} for i in order]
@@ -135,8 +136,16 @@ class Index:
                 score[number] = hit_score
                 used += size
 
+        by_file = {}
+        for number, section in sections.items():
+            by_file.setdefault(section["file"], []).append(number)
+
         for hit in hits:
             new_file = all(sections[n]["file"] != hit["file"] for n in chosen)
+            rest = [n for n in by_file[hit["file"]] if n not in chosen]
+            if config.WHOLE_DOCUMENTS and used + sum(len(part) for n in rest for part in sections[n]["parts"]) <= config.CONTEXT_CHARS:
+                for number in rest:
+                    take(number, hit["score"])
             take(hit["section"], hit["score"])
             if new_file and hit["section"] in chosen:
                 for number in guards.get(hit["file"], []):

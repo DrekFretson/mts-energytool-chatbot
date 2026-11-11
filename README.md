@@ -99,7 +99,11 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 python build_zip.py V6-think 'REASONING_EFFORT="xhigh"'
 ```
 
-Архив появится в `dist/V6-think.zip`; без аргументов собирается `dist/submission.zip` с настройками из `core/config.py`. `REASONING_EFFORT` задает рассуждения модели: `none` быстрее (около 1.5 с на ответ), `xhigh` точнее (около 4-6 с). Локальный прогон на демо-вопросах (нужен запущенный сервер LLM в `LLM_BASE_URL`):
+Архив появится в `dist/V6-think.zip`; без аргументов собирается `dist/submission.zip` с настройками из `core/config.py`. `REASONING_EFFORT` задает рассуждения модели: `none` быстрее (около 1.5 с на ответ), `xhigh` точнее (около 4-10 с).
+
+Два варианта контекста на одном коде:
+- точный (по умолчанию): реранкер отбирает разделы, в контекст идет до `CONTEXT_CHARS` = 14 тыс. символов;
+- широкий: `python build_zip.py V7-wide 'REASONING_EFFORT="xhigh"' 'WHOLE_DOCUMENTS=True' 'CONTEXT_CHARS=60000' 'DIALOG_RECAP=True'` - найденный раздел тянет в контекст весь свой документ в пределах бюджета, последние реплики диалога повторяются после материалов. Бюджет ограничивает контекст при любом размере базы. Локальный прогон на демо-вопросах (нужен запущенный сервер LLM в `LLM_BASE_URL`):
 
 ```bash
 DATA_DIR=data PYTHONPATH=core .venv/bin/python core/solution.py && .venv/bin/python eval/report.py submission.csv data/demo_output.csv
