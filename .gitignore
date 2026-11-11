@@ -9,3 +9,7 @@ submission.csv*
 __pycache__/
 .venv/
 eval/set/knowledge-base.zip
+knowledge-base/
+agent-dump/
+artefacts/
+research-notes.zip
