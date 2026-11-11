@@ -32,6 +32,22 @@ def _clean(text):
 _pool = cf.ThreadPoolExecutor(max_workers=8)
 
 
+def format_materials(hits):
+    """Разделы группируются по документам с названием продукта в заголовке группы.
+
+    В разных документах одно понятие действует с разными условиями; явная граница документа
+    не даёт модели перенести правило одного продукта на другой.
+    """
+    groups, numbered = [], 0
+    for hit in hits:
+        title, _, section = hit["crumb"].partition(" > ")
+        if not groups or groups[-1][0] != (hit["file"], title):
+            groups.append(((hit["file"], title), []))
+        numbered += 1
+        groups[-1][1].append(f"[{numbered}] {section or title}\n{hit['text']}")
+    return "\n\n".join(f'<document title="{title}">\n' + "\n\n".join(parts) + "\n</document>" for (_, title), parts in groups)
+
+
 def answer(index, history, note=""):
     """note - дополнение к правилам от вызывающего канала (веб-чат сообщает про форму заявки)."""
     started = time.perf_counter()
@@ -45,7 +61,7 @@ def answer(index, history, note=""):
     hits = index.context(hits) if config.WHOLE_SECTIONS else hits[: config.TOP_K]
     searched = time.perf_counter()
 
-    materials = "\n\n".join(f"[{number}] {hit['crumb']}\n{hit['text']}" for number, hit in enumerate(hits, 1))
+    materials = format_materials(hits)
     recap = recent.rsplit("\n", 1)[0] if config.DIALOG_RECAP and len(history) > 1 else ""
     messages = history[:-1] + [{"role": "user", "content": prompts.user_turn(materials, question, recap)}]
     system = f"{prompts.SYSTEM}\n\n{note}" if note else prompts.SYSTEM

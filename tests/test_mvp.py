@@ -349,3 +349,21 @@ class Web(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Materials(unittest.TestCase):
+    def test_sections_grouped_by_document_with_product_title(self):
+        hits = [
+            {"file": "a.md", "crumb": "Платформа учёта > Что это", "text": "Учёт по объектам."},
+            {"file": "a.md", "crumb": "Платформа учёта > Ограничения", "text": "Старая система не препятствие."},
+            {"file": "b.md", "crumb": "Оптовый рынок > Аудит", "text": "Пригодность учёта решает аудит."},
+            {"file": "c.md", "crumb": "Справка", "text": "Без подзаголовка."},
+        ]
+        text = pipeline.format_materials(hits)
+        self.assertEqual(text.count("<document "), 3)
+        self.assertEqual(text.count("</document>"), 3)
+        platform, market = text.split('<document title="Оптовый рынок">')
+        self.assertIn("Старая система не препятствие.", platform)
+        self.assertNotIn("Старая система", market)
+        self.assertIn("[3] Аудит", market)
+        self.assertIn('<document title="Справка">\n[4] Справка', text)
