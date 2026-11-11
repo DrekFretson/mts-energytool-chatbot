@@ -32,7 +32,8 @@ def _clean(text):
 _pool = cf.ThreadPoolExecutor(max_workers=8)
 
 
-def answer(index, history):
+def answer(index, history, note=""):
+    """note - дополнение к правилам от вызывающего канала (веб-чат сообщает про форму заявки)."""
     started = time.perf_counter()
     # Маршрут считается параллельно и ответ не ждёт: к концу генерации он уже готов.
     pending = _pool.submit(router.classify, history) if config.ROUTER == "parallel" else None
@@ -45,7 +46,8 @@ def answer(index, history):
 
     materials = "\n\n".join(f"[{number}] {hit['crumb']}\n{hit['text']}" for number, hit in enumerate(hits, 1))
     messages = history[:-1] + [{"role": "user", "content": prompts.user_turn(materials, question)}]
-    text = _clean(llm.chat([{"role": "system", "content": prompts.SYSTEM}] + messages))
+    system = f"{prompts.SYSTEM}\n\n{note}" if note else prompts.SYSTEM
+    text = _clean(llm.chat([{"role": "system", "content": system}] + messages))
     finished = time.perf_counter()
 
     route = pending.result() if pending else None

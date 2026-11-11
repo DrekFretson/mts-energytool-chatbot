@@ -18,6 +18,13 @@ def vector(text):
     return result
 
 
+def route(transcript):
+    """Маршрут для классификатора: метка [operator] или [ready] в последней реплике клиента, иначе question."""
+    last = [line for line in transcript.splitlines() if line.startswith("Клиент:")][-1:]
+    found = re.search(r"\[(operator|ready)\]", last[0] if last else "")
+    return {"reason": "fake", "route": found.group(1) if found else "question"}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -29,6 +36,8 @@ class Handler(BaseHTTPRequestHandler):
             result = {"data": [{"index": i, "embedding": vector(t)} for i, t in enumerate(texts)]}
         elif self.path.endswith("/rerank"):
             result = {"results": [{"index": i, "relevance_score": 1.0} for i in range(len(body["documents"]))]}
+        elif "response_format" in body:
+            result = {"choices": [{"message": {"role": "assistant", "content": json.dumps(route(body["messages"][-1]["content"]))}}]}
         else:
             time.sleep(CHAT_DELAY)
             content = "[fake-llm] Ответ-заглушка: подключите настоящую модель. Какой у вас объект?"

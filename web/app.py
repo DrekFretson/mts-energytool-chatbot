@@ -31,12 +31,20 @@ DB_PATH = os.getenv("DB_PATH", "data/app.sqlite")
 KB_PATH = os.getenv("KB_PATH", "data/knowledge-base.zip")
 DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "")
 HISTORY_LIMIT = 12
-OFFER_AFTER_USER_TURNS = 3
 ANSWER_BUDGET_SEC = float(os.getenv("ANSWER_BUDGET_SEC", "25"))  # дольше ответа пользователь не ждёт: отдаём заглушку
 MESSAGES_PER_MINUTE = int(os.getenv("MESSAGES_PER_MINUTE", "20"))  # на один IP
 MAX_BODY_BYTES = 64 * 1024
 # В вебе граф включён: классификатор параллельно с поиском, правило про заявку в промпте остаётся страховкой (G+P).
 config.ROUTER = os.getenv("WEB_ROUTER", "parallel")
+NOTE_FORM = ("Особенность этого канала (веб-чат), она важнее образцов: заявка оформляется через форму, которая открывается "
+             "под сообщением, когда клиент хочет связаться с менеджером. Поэтому не проси писать ФИО, телефон и компанию в чат, "
+             "а попроси заполнить форму заявки под сообщением и скажи, что менеджер получит краткое резюме диалога.")
+NOTE_LEAD_DONE = ("Клиент уже отправил заявку в этом диалоге: контакты больше не спрашивай и заявку не предлагай. "
+                  "Если он снова просит менеджера, скажи, что заявка уже передана и менеджер свяжется с ним.")
+
+if not Path(KB_PATH).is_file():
+    sys.exit(f"Не найден файл базы знаний {KB_PATH}. Положите архив knowledge-base.zip из материалов кейса "
+             "в data/knowledge-base.zip (в Docker он монтируется в /kb/knowledge-base.zip) и запустите снова.")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, created_at REAL NOT NULL);
@@ -182,27 +190,29 @@ def reply(session_id, message, x_debug_token):
         "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
         session_id, message.text, time.time(),
     )
+    has_lead = bool(query("SELECT 1 FROM leads WHERE session_id = ?", session_id))
     llm.set_deadline(ANSWER_BUDGET_SEC)
     try:
-        result = pipeline.answer(state["index"], load_history(session_id, HISTORY_LIMIT))
+        result = pipeline.answer(state["index"], load_history(session_id, HISTORY_LIMIT), NOTE_LEAD_DONE if has_lead else NOTE_FORM)
     except Exception as exc:
         print(f"Ошибка генерации: {type(exc).__name__}", file=sys.stderr, flush=True)
         result = {"text": config.FALLBACK_ANSWER, "sources": [], "timings": {}, "unverified_numbers": [], "degraded": True}
     finally:
         llm.set_deadline(None)
 
-    meta = {key: value for key, value in result.items() if key != "text"}
+    offered = query("SELECT 1 FROM messages WHERE session_id = ? AND json_extract(meta, '$.offer_lead')", session_id)
+    open_form = result.get("route") == "operator" and not has_lead
+    offer_lead = result.get("route") == "ready" and not has_lead and not offered
+    meta = {key: value for key, value in result.items() if key != "text"} | {"offer_lead": offer_lead}
     query(
         "INSERT INTO messages (session_id, role, content, meta, created_at) VALUES (?, 'assistant', ?, ?, ?)",
         session_id, result["text"], json.dumps(meta, ensure_ascii=False), time.time(),
     )
-    user_turns = query("SELECT count(*) AS n FROM messages WHERE session_id = ? AND role = 'user'", session_id)[0]["n"]
-    # shortcut: момент предложения по числу реплик; заменить на разбор намерений (сигнал покупки, отказ).
-    open_form = result.get("route") == "operator"  # клиент сам попросил менеджера: сразу показать форму заявки
-    response = {"text": result["text"], "open_form": open_form,
-                "offer_lead": not open_form and user_turns == OFFER_AFTER_USER_TURNS}
+    response = {"text": result["text"], "open_form": open_form, "offer_lead": offer_lead}
     if has_debug_access(x_debug_token):
         response["debug"] = meta
+    elif x_debug_token is not None:
+        response["debug_error"] = "Неверный токен отладки" if DEBUG_TOKEN else "Отладка отключена на сервере: не задан DEBUG_TOKEN"
     return response
 
 

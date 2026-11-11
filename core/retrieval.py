@@ -35,7 +35,9 @@ class Index:
         documents = [_document(chunk) for chunk in chunks]
         self.bm25 = BM25Okapi([tokenize(document) for document in documents])
         try:
-            self.vectors = llm.embed(documents)
+            vectors = llm.embed(documents + list(config.ASPECT_QUERIES))
+            self.vectors = vectors[: len(documents)]
+            self.aspects = self.vectors @ vectors[len(documents) :].T
         except Exception as exc:
             print(f"Эмбеддинги недоступны, только BM25: {type(exc).__name__}", file=sys.stderr)
             self.vectors = None
@@ -76,10 +78,11 @@ class Index:
     def search(self, query, past=()):
         past = list(past)
         lexical = self._lexical(query, past)
-        scores = lexical
+        scores, dense = lexical, None
         if self.vectors is not None and time.monotonic() >= self._dense_paused_until:
             try:
-                scores = config.DENSE_WEIGHT * self._dense(query, past) + (1 - config.DENSE_WEIGHT) * lexical
+                dense = self._dense(query, past)
+                scores = config.DENSE_WEIGHT * dense + (1 - config.DENSE_WEIGHT) * lexical
                 self._dense_failures = 0
             except Exception as exc:
                 print(f"Эмбеддинг запроса не получен: {type(exc).__name__}", file=sys.stderr)
@@ -90,7 +93,20 @@ class Index:
         order = [int(i) for i in np.argsort(-scores)[: config.CANDIDATES]]
         if config.USE_RERANK:
             order = self._rerank(query, order)
+        if dense is not None:
+            order = self._aspect_first(dense, order)
         return [{**self.chunks[i], "score": round(float(scores[i]), 4)} for i in order]
+
+    def _aspect_first(self, dense, order):
+        """Перед найденным ставит разделы той же темы с ограничениями и со списком нужных от клиента сведений.
+
+        Оговорка и уточняющий вопрос ответа берутся из них, а по тексту вопроса они почти не находятся.
+        """
+        picked = []
+        for aspect in self.aspects.T:
+            top = np.argsort(-(dense + config.ASPECT_WEIGHT * aspect))[: config.ASPECT_SECTIONS]
+            picked.extend(int(i) for i in top if int(i) not in picked)
+        return picked + [i for i in order if i not in picked]
 
     def context(self, hits):
         """Найденные куски -> разделы целиком по рангу, пока влезают в CONTEXT_CHARS.

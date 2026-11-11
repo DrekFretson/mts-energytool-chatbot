@@ -66,6 +66,12 @@ class ClassifyTest(unittest.TestCase):
     def test_valid_operator(self):
         self.check({"return_value": {"route": "operator", "reason": "просит менеджера"}}, "operator", True)
 
+    def test_valid_ready(self):
+        self.check({"return_value": {"route": "ready", "reason": "нужен расчёт"}}, "ready", True)
+
+    def test_schema_lists_every_route(self):
+        self.assertEqual(set(prompts.ROUTER_SCHEMA["properties"]["route"]["enum"]), set(router.ROUTES))
+
     def test_unknown_route_is_question(self):
         self.check({"return_value": {"route": "manager", "reason": "?"}}, "question", False)
 

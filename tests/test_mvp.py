@@ -281,16 +281,25 @@ class Web(unittest.TestCase):
 
     def test_scenario_question_to_lead_and_history(self):
         sid = self.session()
-        offers = [self.client.post(f"/api/sessions/{sid}/messages", json={"text": f"вопрос {i}"}).json()["offer_lead"] for i in range(4)]
-        self.assertEqual(offers, [False, False, True, False])
+        texts = ["вопрос", "вопрос [ready]", "вопрос [ready]", "вопрос"]
+        offers = [self.client.post(f"/api/sessions/{sid}/messages", json={"text": t}).json()["offer_lead"] for t in texts]
+        self.assertEqual(offers, [False, True, False, False])
 
         lead = {"name": "Тест Тестов", "phone": "8 (900) 000-00-00", "company": "ООО Тест", "consent": True}
-        self.assertEqual(self.client.post(f"/api/sessions/{sid}/lead", json=lead).json()["status"], "created")
+        created = self.client.post(f"/api/sessions/{sid}/lead", json=lead).json()
+        self.assertEqual(created["status"], "created")
+        self.assertTrue(created["summary"])
         self.assertEqual(self.client.post(f"/api/sessions/{sid}/lead", json=lead).json()["status"], "exists")
 
         detail = self.client.get(f"/api/admin/sessions/{sid}", headers={"X-Debug-Token": "secret"}).json()
         self.assertEqual(len(detail["messages"]), 8)
         self.assertEqual(detail["lead"]["phone"], "+79000000000")
+
+        notes = []
+        with mock.patch.object(pipeline, "answer", lambda index, history, note="": notes.append(note) or {"text": "ок", "route": "operator"}):
+            after = self.client.post(f"/api/sessions/{sid}/messages", json={"text": "Позовите менеджера"}).json()
+        self.assertEqual((after["open_form"], after["offer_lead"]), (False, False))
+        self.assertIn("уже отправил заявку", notes[0])
 
     def test_operator_route_opens_lead_form(self):
         sid = self.session()
@@ -313,6 +322,7 @@ class Web(unittest.TestCase):
         self.assertNotIn("debug", plain)
         wrong = self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вопрос"}, headers={"X-Debug-Token": "nope"}).json()
         self.assertNotIn("debug", wrong)
+        self.assertEqual(wrong["debug_error"], "Неверный токен отладки")
         good = self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вопрос"}, headers={"X-Debug-Token": "secret"}).json()
         self.assertIn("total_ms", good["debug"]["timings"])
         self.assertTrue(good["debug"]["sources"])
@@ -324,6 +334,13 @@ class Web(unittest.TestCase):
         self.client.post(f"/api/sessions/{second}/messages", json={"text": "другое"})
         detail = self.client.get(f"/api/admin/sessions/{second}", headers={"X-Debug-Token": "secret"}).json()
         self.assertNotIn("секрет", " ".join(m["content"] for m in detail["messages"]))
+
+    def test_missing_kb_stops_with_clear_message(self):
+        env = {**os.environ, "KB_PATH": str(Path(TMP.name, "missing.zip"))}
+        done = subprocess.run([sys.executable, "-c", "import web.app"], cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("data/knowledge-base.zip", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
 
     def test_unknown_session(self):
         self.assertEqual(self.client.post("/api/sessions/none/messages", json={"text": "x"}).status_code, 404)

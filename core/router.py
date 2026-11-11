@@ -1,4 +1,4 @@
-"""Классификатор реплики: operator (клиент просит человека или заявку) или question (обычный ответ). Только LLM, без ключевых слов."""
+"""Классификатор реплики: operator (клиент просит человека или заявку), ready (уместно предложить менеджера) или question (обычный ответ). Только LLM, без ключевых слов."""
 
 import time
 
@@ -6,7 +6,7 @@ import config
 import llm
 import prompts
 
-ROUTES = ("operator", "question")
+ROUTES = ("operator", "ready", "question")
 
 
 def _transcript(history, turns=6):
