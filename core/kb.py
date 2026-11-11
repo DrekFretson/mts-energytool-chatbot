@@ -9,6 +9,8 @@ import config
 COLUMNS = re.compile(r"^\s*-+(?: +-+)+\s*$")
 RULE = re.compile(r"^\s*-{5,}\s*$")
 HEADING = re.compile(r"^(#{1,3}) +(.+?)\s*$")
+# Заголовок, который при выгрузке потерял перенос строки и был экранирован: "...текст. \## Заголовок".
+GLUED_HEADING = re.compile(r"[ \t]*\\(#{1,3} )")
 
 
 def _cells(block, spans):
@@ -101,6 +103,7 @@ def split_sections(name, text):
             crumb = dashes(" > ".join(path[level] for level in sorted(path)) or PurePosixPath(name).stem)
             sections.append((crumb, content))
 
+    text = GLUED_HEADING.sub(lambda m: "\n\n" + m[1], text)
     for line in normalize_tables(text).split("\n"):
         match = HEADING.match(line)
         if match:
