@@ -6,20 +6,23 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 import config  # noqa: E402
 import kb  # noqa: E402
+import llm  # noqa: E402
 import pipeline  # noqa: E402
 import retrieval  # noqa: E402
 
@@ -29,6 +32,11 @@ KB_PATH = os.getenv("KB_PATH", "data/knowledge-base.zip")
 DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "")
 HISTORY_LIMIT = 12
 OFFER_AFTER_USER_TURNS = 3
+ANSWER_BUDGET_SEC = float(os.getenv("ANSWER_BUDGET_SEC", "25"))  # дольше ответа пользователь не ждёт: отдаём заглушку
+MESSAGES_PER_MINUTE = int(os.getenv("MESSAGES_PER_MINUTE", "20"))  # на один IP
+MAX_BODY_BYTES = 64 * 1024
+# В вебе граф включён: классификатор параллельно с поиском, правило про заявку в промпте остаётся страховкой (G+P).
+config.ROUTER = os.getenv("WEB_ROUTER", "parallel")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, created_at REAL NOT NULL);
@@ -61,12 +69,55 @@ async def lifespan(_):
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.executescript(SCHEMA)
+    # WAL: чтение истории не ждёт записи соседних сессий; режим сохраняется в самом файле базы.
+    connection.execute("PRAGMA journal_mode=WAL")
     connection.close()
     state["index"] = retrieval.Index(kb.load_chunks(KB_PATH))
     yield
 
 
 app = FastAPI(title="МТС EnergyTool консультант", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def limit_body(request, call_next):
+    if int(request.headers.get("content-length") or 0) > MAX_BODY_BYTES:
+        return JSONResponse({"detail": "Слишком большой запрос"}, status_code=413)
+    return await call_next(request)
+
+
+# shortcut: ограничения в памяти одного процесса; при нескольких репликах перенести в Valkey.
+_guard_lock = threading.Lock()
+_busy_sessions = set()
+_recent = {}
+
+
+def rate_limit(ip):
+    now = time.monotonic()
+    with _guard_lock:
+        hits = _recent.setdefault(ip, deque())
+        while hits and now - hits[0] > 60:
+            hits.popleft()
+        if len(hits) >= MESSAGES_PER_MINUTE:
+            raise HTTPException(429, "Слишком много сообщений, подождите минуту")
+        hits.append(now)
+
+
+class session_busy:
+    """Одна обработка на сессию: двойной клик или повтор не задваивает ответ и заявку."""
+
+    def __init__(self, session_id):
+        self.session_id = session_id
+
+    def __enter__(self):
+        with _guard_lock:
+            if self.session_id in _busy_sessions:
+                raise HTTPException(429, "Предыдущий запрос ещё обрабатывается")
+            _busy_sessions.add(self.session_id)
+
+    def __exit__(self, *exc):
+        with _guard_lock:
+            _busy_sessions.discard(self.session_id)
 
 
 class Message(BaseModel):
@@ -119,17 +170,26 @@ def create_session():
 
 
 @app.post("/api/sessions/{session_id}/messages")
-def send_message(session_id: str, message: Message, x_debug_token: Annotated[str | None, Header()] = None):
+def send_message(session_id: str, message: Message, request: Request, x_debug_token: Annotated[str | None, Header()] = None):
     require_session(session_id)
+    rate_limit(request.client.host if request.client else "")
+    with session_busy(session_id):
+        return reply(session_id, message, x_debug_token)
+
+
+def reply(session_id, message, x_debug_token):
     query(
         "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
         session_id, message.text, time.time(),
     )
+    llm.set_deadline(ANSWER_BUDGET_SEC)
     try:
         result = pipeline.answer(state["index"], load_history(session_id, HISTORY_LIMIT))
     except Exception as exc:
         print(f"Ошибка генерации: {type(exc).__name__}", file=sys.stderr, flush=True)
         result = {"text": config.FALLBACK_ANSWER, "sources": [], "timings": {}, "unverified_numbers": [], "degraded": True}
+    finally:
+        llm.set_deadline(None)
 
     meta = {key: value for key, value in result.items() if key != "text"}
     query(
@@ -138,7 +198,9 @@ def send_message(session_id: str, message: Message, x_debug_token: Annotated[str
     )
     user_turns = query("SELECT count(*) AS n FROM messages WHERE session_id = ? AND role = 'user'", session_id)[0]["n"]
     # shortcut: момент предложения по числу реплик; заменить на разбор намерений (сигнал покупки, отказ).
-    response = {"text": result["text"], "offer_lead": user_turns == OFFER_AFTER_USER_TURNS}
+    open_form = result.get("route") == "operator"  # клиент сам попросил менеджера: сразу показать форму заявки
+    response = {"text": result["text"], "open_form": open_form,
+                "offer_lead": not open_form and user_turns == OFFER_AFTER_USER_TURNS}
     if has_debug_access(x_debug_token):
         response["debug"] = meta
     return response
@@ -152,19 +214,23 @@ def create_lead(session_id: str, lead: Lead):
     phone = normalize_phone(lead.phone)
     if query("SELECT 1 FROM leads WHERE session_id = ?", session_id):
         return {"status": "exists"}
-    try:
-        summary = pipeline.summarize(load_history(session_id))
-    except Exception as exc:
-        # Заявку нельзя терять из-за сбоя LLM: менеджер увидит диалог в истории.
-        print(f"Резюме не построено: {type(exc).__name__}", file=sys.stderr, flush=True)
-        summary = "Резюме не сформировано, см. историю диалога."
-    now = time.time()
-    query(
-        "INSERT OR IGNORE INTO leads (session_id, name, phone, company, consent_at, summary, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        session_id, lead.name.strip(), phone, lead.company.strip(), now, summary, now,
-    )
-    return {"status": "created", "summary": summary}
+    with session_busy(session_id):
+        llm.set_deadline(ANSWER_BUDGET_SEC)
+        try:
+            summary = pipeline.summarize(load_history(session_id))
+        except Exception as exc:
+            # Заявку нельзя терять из-за сбоя LLM: менеджер увидит диалог в истории.
+            print(f"Резюме не построено: {type(exc).__name__}", file=sys.stderr, flush=True)
+            summary = "Резюме не сформировано, см. историю диалога."
+        finally:
+            llm.set_deadline(None)
+        now = time.time()
+        created = query(
+            "INSERT OR IGNORE INTO leads (session_id, name, phone, company, consent_at, summary, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING session_id",
+            session_id, lead.name.strip(), phone, lead.company.strip(), now, summary, now,
+        )
+    return {"status": "created", "summary": summary} if created else {"status": "exists"}
 
 
 @app.get("/api/admin/sessions")

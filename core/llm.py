@@ -1,7 +1,10 @@
 """Клиент OpenAI-совместимого прокси: чат, эмбеддинги, реранк. Адреса и ключи только из env."""
 
+import json
 import os
+import random
 import re
+import threading
 import time
 
 import httpx
@@ -43,17 +46,48 @@ _reasoning = {
 }
 
 
+_budget = threading.local()  # срок текущей задачи потока (вопрос, запрос веба, сборка индекса)
+
+
+class BudgetExceeded(TimeoutError):
+    pass
+
+
+def set_deadline(seconds):
+    """Все вызовы прокси в этом потоке укладываются в seconds от текущего момента; None снимает срок."""
+    _budget.deadline = None if seconds is None else time.monotonic() + seconds
+
+
+def _remaining():
+    deadline = getattr(_budget, "deadline", None)
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def _backoff(attempt, exc):
+    retry_after = isinstance(exc, httpx.HTTPStatusError) and exc.response.headers.get("retry-after", "")
+    if retry_after and retry_after.replace(".", "", 1).isdigit():
+        return min(float(retry_after), 10.0)
+    # Случайный разброс: иначе параллельные потоки бьют в лимит прокси одновременно.
+    return 2**attempt * (0.5 + random.random())
+
+
 def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
     base_url = base_url or BASE_URL
     if not base_url:
         raise RuntimeError("Не задан LLM_BASE_URL")
     for attempt in range(attempts):
+        timeout_now = timeout or config.LLM_TIMEOUT
+        left = _remaining()
+        if left is not None:
+            if left <= 0.5:
+                raise BudgetExceeded(f"срок задачи истёк до запроса {path}")
+            timeout_now = min(timeout_now, left)
         try:
             response = _client.post(
                 base_url + path,
                 headers={"Authorization": f"Bearer {api_key or API_KEY}"},
                 json=body,
-                timeout=timeout or config.LLM_TIMEOUT,
+                timeout=timeout_now,
             )
             if response.status_code < 500 and response.status_code != 429:
                 response.raise_for_status()
@@ -63,9 +97,11 @@ def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
             retryable = not isinstance(exc, httpx.HTTPStatusError) or (
                 exc.response.status_code == 429 or exc.response.status_code >= 500
             )
-            if not retryable or attempt == attempts - 1:
+            pause = _backoff(attempt, exc)
+            left = _remaining()
+            if not retryable or attempt == attempts - 1 or (left is not None and left < pause + 1):
                 raise
-            time.sleep(2**attempt)
+            time.sleep(pause)
 
 
 def chat_body(messages, max_tokens=None):
@@ -90,10 +126,12 @@ def _post_chat(body):
         if "max_tokens" in _limits:
             body["max_tokens"] = min(body["max_tokens"], _limits["max_tokens"])
         try:
-            # Один повтор: зависший на рассуждениях запрос иначе держит вопрос три тайм-аута подряд.
-            return _post("/chat/completions", body, attempts=2)
+            # Повторы ограничены сроком вопроса (set_deadline), а не числом попыток.
+            return _post("/chat/completions", body, attempts=3)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (400, 422) and "max_tokens" in exc.response.text and body["max_tokens"] > 512:
+            if exc.response.status_code in (400, 422) and "max_tokens" in exc.response.text:
+                if body["max_tokens"] <= 64:
+                    raise
                 # Прокси ограничивает длину ответа: уменьшаем лимит и запоминаем, а не теряем поля рассуждений.
                 _limits["max_tokens"] = body["max_tokens"] // 2
                 continue
@@ -159,7 +197,7 @@ def probe():
 
 def embed(texts, batch_size=32):
     vectors = []
-    for start in range(0, len(texts), batch_size):
+    for start in range(0, len(texts), batch_size):  # срок задаёт set_deadline вызывающего потока
         batch = texts[start : start + batch_size]
         data = _post("/embeddings", {"model": EMB_MODEL, "input": batch}, base_url=EMB_BASE_URL, api_key=EMB_API_KEY)["data"]
         ordered = sorted(enumerate(data), key=lambda pair: pair[1].get("index", pair[0]))
@@ -177,3 +215,40 @@ def rerank(query, documents):
         attempts=1,
     )
     return [int(item["index"]) for item in result.get("results", result.get("data", []))]
+
+
+def _lenient_json(text):
+    """Первый JSON-объект в тексте: модели иногда оборачивают его в ``` или пишут фразу до него."""
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        for end in range(start, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[end], 0)
+            if depth == 0:
+                try:
+                    return json.loads(text[start : end + 1])
+                except ValueError:
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
+def chat_json(messages, schema, max_tokens=200, timeout=None):
+    """Структурный ответ: json_schema, при отказе прокси json_object, затем мягкий разбор. None, если JSON не получен."""
+    formats = [{"type": "json_schema", "json_schema": {"name": "out", "schema": schema, "strict": True}}, {"type": "json_object"}]
+    for response_format in formats:
+        body = {**chat_body(messages, max_tokens), "response_format": response_format}
+        # Только поля, которые прокси уже принял (лишние _post_chat отсеял на пробе): классификатору рассуждения не нужны.
+        body.update({key: _OFF[key] for key in list(body) if key in _OFF})
+        try:
+            result = _post("/chat/completions", body, timeout=timeout, attempts=1)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (400, 422):
+                continue
+            raise
+        text, _ = _answer(result)
+        try:
+            return json.loads(text)
+        except ValueError:
+            return _lenient_json(text)
+    return None

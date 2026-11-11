@@ -1,11 +1,13 @@
 """Единый контракт ядра для сабмита и веба: answer(index, history) -> {text, sources, timings, ...}."""
 
+import concurrent.futures as cf
 import re
 import time
 
 import config
 import llm
 import prompts
+import router
 
 MARKER = re.compile(r"(?m)^\s*(Пользователь|Клиент|Ассистент|Бот)\s*:\s*")
 NUMBER = re.compile(r"\d+")
@@ -27,8 +29,13 @@ def _clean(text):
     return " ".join(re.sub(r"[*#`]+", "", text).split())
 
 
+_pool = cf.ThreadPoolExecutor(max_workers=8)
+
+
 def answer(index, history):
     started = time.perf_counter()
+    # Маршрут считается параллельно и ответ не ждёт: к концу генерации он уже готов.
+    pending = _pool.submit(router.classify, history) if config.ROUTER == "parallel" else None
     question = history[-1]["content"]
     past = [turn["content"] for turn in history[:-1] if turn["role"] == "user"]
 
@@ -41,14 +48,19 @@ def answer(index, history):
     text = _clean(llm.chat([{"role": "system", "content": prompts.SYSTEM}] + messages))
     finished = time.perf_counter()
 
+    route = pending.result() if pending else None
+
     known = set(NUMBER.findall(materials + " ".join(turn["content"] for turn in history)))
     return {
         "text": text,
+        "route": route["route"] if route else "off",
+        "router": route,
         "sources": [{"file": h["file"], "crumb": h["crumb"], "score": h["score"]} for h in hits],
         "timings": {
             "search_ms": round((searched - started) * 1000),
             "llm_ms": round((finished - searched) * 1000),
             "total_ms": round((finished - started) * 1000),
+            "router_ms": route["ms"] if route else 0,
         },
         "unverified_numbers": sorted(set(NUMBER.findall(text)) - known),
     }

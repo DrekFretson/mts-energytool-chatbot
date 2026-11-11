@@ -34,13 +34,48 @@ def write_csv(answers):
     os.replace("submission.csv.tmp", "submission.csv")
 
 
+def read_questions(path):
+    """id -> вопрос. Терпит другие имена столбцов, пустые строки и огромные поля; строки без id пропускает."""
+    csv.field_size_limit(sys.maxsize)
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return {}
+    header = [name.strip().lower() for name in rows[0]]
+    id_col = header.index("id") if "id" in header else 0
+    q_col = header.index("question") if "question" in header else min(1, len(header) - 1)
+    questions = {}
+    for row in rows[1:]:
+        qid = row[id_col].strip() if len(row) > id_col else ""
+        if not qid:
+            print(f"Строка без id пропущена: {row[:2]}", file=sys.stderr, flush=True)
+            continue
+        questions[qid] = row[q_col] if len(row) > q_col else ""
+    return questions
+
+
+def workers_from_env():
+    try:
+        return max(1, min(8, int(llm._env("MAX_WORKERS", default="3"))))
+    except ValueError:
+        return 3
+
+
+def behind_schedule(elapsed, indexed, done, total, workers):
+    """Прогноз по темпу уже готовых ответов (они идут параллельно, старт не считается) выходит за REASONING_UNTIL_SEC.
+    Раньше двух волн по workers вопросов темп неточен, решения нет."""
+    if done < 2 * workers:
+        return False
+    return elapsed + (total - done) * (elapsed - indexed) / done > config.REASONING_UNTIL_SEC
+
+
 def main():
     started = time.monotonic()
-    with find_file("questions.csv", "train.csv").open(encoding="utf-8-sig", newline="") as f:
-        questions = {row["id"].strip(): row["question"] for row in csv.DictReader(f)}
+    questions = read_questions(find_file("questions.csv", "train.csv"))
     answers = {qid: config.FALLBACK_ANSWER for qid in questions}
     write_csv(answers)
 
+    llm.set_deadline(config.QUESTION_BUDGET_SEC)
     try:
         if config.REASONING_EFFORT != "none" or llm.probe():
             # Модель рассуждает: без запаса токенов и времени ответы обрезаются и уходят в запасной текст.
@@ -49,38 +84,61 @@ def main():
             print("Режим с рассуждениями: лимит токенов и тайм-аут увеличены", flush=True)
     except Exception as exc:
         print(f"Проба LLM не удалась: {type(exc).__name__}", file=sys.stderr, flush=True)
+    llm.set_deadline(None)
 
-    index = retrieval.Index(kb.load_chunks(find_file("knowledge-base.zip", "knowledge_base.zip", "kb.zip")))
+    chunks = kb.load_chunks(find_file("knowledge-base.zip", "knowledge_base.zip", "kb.zip"))
+    llm.set_deadline(config.STARTUP_EMBED_SEC)
+    index = retrieval.Index(chunks)
+    llm.set_deadline(None)
     print(f"Вопросов: {len(questions)}; фрагментов: {len(index.chunks)}; "
           f"индекс: {time.monotonic() - started:.1f} с", flush=True)
 
     finished = []
+    budget = config.QUESTION_BUDGET_SEC * (1 if config.LLM_TIMEOUT < config.REASONING_TIMEOUT else 3)
+
+    indexed = time.monotonic() - started
+    workers = workers_from_env()
 
     def work(qid, question):
         elapsed = time.monotonic() - started
-        if finished and elapsed + (len(questions) - len(finished)) * elapsed / len(finished) > config.REASONING_UNTIL_SEC:
-            # Прогноз по уже готовым ответам не укладывается в лимит: дальше отвечаем без рассуждений.
+        if behind_schedule(elapsed, indexed, len(finished), len(questions), workers):
+            # Прогноз по уже готовым ответам не укладывается в лимит: дальше без рассуждений и без реранка (~25% времени вопроса).
             llm.reasoning_off()
+            config.USE_RERANK = False
+        # Срок вопроса не дольше остатка до дедлайна: зависший вызов не держит поток после конца прогона.
+        llm.set_deadline(min(budget, config.DEADLINE_SEC - (time.monotonic() - started)))
         try:
-            return qid, pipeline.answer(index, pipeline.parse_dialog(question))["text"]
+            return qid, pipeline.answer(index, pipeline.parse_dialog(question or ""))["text"]
         except Exception as exc:
             print(f"Вопрос {qid}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             return qid, ""
 
-    workers = max(1, min(8, int(llm._env("MAX_WORKERS", default="3"))))
     pool = cf.ThreadPoolExecutor(max_workers=workers)
-    futures = [pool.submit(work, qid, question) for qid, question in questions.items()]
-    done = 0
-    try:
-        for future in cf.as_completed(futures, timeout=max(1, config.DEADLINE_SEC - (time.monotonic() - started))):
-            qid, text = future.result()
-            finished.append(qid)
-            if text:
+    done, pending, flushed = 0, list(questions), time.monotonic()
+    # Второй и следующие проходы: упавшие из-за сбоев прокси вопросы повторяются, пока есть время.
+    while pending and config.DEADLINE_SEC - (time.monotonic() - started) > (config.RETRY_MARGIN_SEC if done else 0):
+        futures = [pool.submit(work, qid, questions[qid]) for qid in pending]
+        failed = []
+        try:
+            for future in cf.as_completed(futures, timeout=max(1, config.DEADLINE_SEC - (time.monotonic() - started))):
+                qid, text = future.result()
+                finished.append(qid)
+                if not text:
+                    failed.append(qid)
+                    continue
                 answers[qid] = text[:MAX_ANSWER_CHARS]
                 done += 1
-                write_csv(answers)
-    except cf.TimeoutError:
-        print("Дедлайн: оставшиеся ответы остаются запасными", file=sys.stderr, flush=True)
+                if time.monotonic() - flushed > config.CSV_FLUSH_SEC:
+                    write_csv(answers)
+                    flushed = time.monotonic()
+        except cf.TimeoutError:
+            print("Дедлайн: оставшиеся ответы остаются запасными", file=sys.stderr, flush=True)
+            break
+        if failed and len(failed) < len(pending):
+            print(f"Повторный проход: {len(failed)} вопросов", file=sys.stderr, flush=True)
+        elif failed:
+            break  # ни один не прошёл: сбой не временный, повтор только тратит время
+        pending = failed
 
     write_csv(answers)
     print(f"Готово: {done} из {len(questions)} за {time.monotonic() - started:.0f} с", flush=True)

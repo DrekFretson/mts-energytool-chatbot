@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import zipfile
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +27,7 @@ os.environ.update(DB_PATH=f"{TMP.name}/app.sqlite")
 
 import kb  # noqa: E402
 import pipeline  # noqa: E402
+import router  # noqa: E402
 
 TABLE = """# Заголовок
 
@@ -289,6 +291,14 @@ class Web(unittest.TestCase):
         detail = self.client.get(f"/api/admin/sessions/{sid}", headers={"X-Debug-Token": "secret"}).json()
         self.assertEqual(len(detail["messages"]), 8)
         self.assertEqual(detail["lead"]["phone"], "+79000000000")
+
+    def test_operator_route_opens_lead_form(self):
+        sid = self.session()
+        decision = {"route": "operator", "reason": "просит менеджера", "ok": True, "ms": 1}
+        with mock.patch.object(router, "classify", return_value=decision):
+            reply = self.client.post(f"/api/sessions/{sid}/messages", json={"text": "Позовите менеджера"}).json()
+        self.assertTrue(reply["open_form"])
+        self.assertFalse(reply["offer_lead"])
 
     def test_lead_requires_consent_and_valid_phone(self):
         sid = self.session()

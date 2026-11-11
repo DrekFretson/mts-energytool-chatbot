@@ -85,7 +85,11 @@ async function api(path, body, headers = {}) {
     body: JSON.stringify(body ?? {}),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Проверьте введённые данные");
+  if (!response.ok) {
+    const error = new Error(typeof data.detail === "string" ? data.detail : "Проверьте введённые данные");
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -114,9 +118,10 @@ $("send").addEventListener("submit", async (event) => {
     const reply = await api(`/api/sessions/${sessionId}/messages`, { text }, headers);
     add("assistant", reply.text);
     if (reply.debug) addDebug(reply.debug);
+    if (reply.open_form) $("lead").showModal();
     if (reply.offer_lead) add("assistant", "Если хотите, передам ваш запрос менеджеру с резюме диалога: нажмите «Связаться с менеджером».");
   } catch (error) {
-    add("assistant", "Не получилось ответить. Попробуйте ещё раз.");
+    add("assistant", error.status === 429 || error.status === 413 ? error.message : "Не получилось ответить. Попробуйте ещё раз.");
   } finally {
     $("submit").disabled = false;
     $("text").focus();
