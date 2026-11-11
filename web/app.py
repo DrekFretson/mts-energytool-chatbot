@@ -31,7 +31,7 @@ DB_PATH = os.getenv("DB_PATH", "data/app.sqlite")
 KB_PATH = os.getenv("KB_PATH", "data/knowledge-base.zip")
 DEBUG_TOKEN = os.getenv("DEBUG_TOKEN", "")
 HISTORY_LIMIT = 12
-ANSWER_BUDGET_SEC = float(os.getenv("ANSWER_BUDGET_SEC", "25"))  # дольше ответа пользователь не ждёт: отдаём заглушку
+ANSWER_BUDGET_SEC = float(os.getenv("ANSWER_BUDGET_SEC", "90"))  # дольше ответа пользователь не ждёт: отдаём заглушку
 MESSAGES_PER_MINUTE = int(os.getenv("MESSAGES_PER_MINUTE", "20"))  # на один IP
 MAX_BODY_BYTES = 64 * 1024
 # В вебе граф включён: классификатор параллельно с поиском, правило про заявку в промпте остаётся страховкой (G+P).
@@ -80,6 +80,8 @@ async def lifespan(_):
     # WAL: чтение истории не ждёт записи соседних сессий; режим сохраняется в самом файле базы.
     connection.execute("PRAGMA journal_mode=WAL")
     connection.close()
+    if config.REASONING_EFFORT != "none":
+        llm.reasoning_mode()
     state["index"] = retrieval.Index(kb.load_chunks(KB_PATH))
     yield
 

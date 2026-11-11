@@ -78,9 +78,7 @@ def main():
     llm.set_deadline(config.QUESTION_BUDGET_SEC)
     try:
         if config.REASONING_EFFORT != "none" or llm.probe():
-            # Модель рассуждает: без запаса токенов и времени ответы обрезаются и уходят в запасной текст.
-            config.MAX_ANSWER_TOKENS = llm.MAX_TOKENS = max(llm.MAX_TOKENS, config.REASONING_MAX_TOKENS)
-            config.LLM_TIMEOUT = config.REASONING_TIMEOUT
+            llm.reasoning_mode()
             print("Режим с рассуждениями: лимит токенов и тайм-аут увеличены", flush=True)
     except Exception as exc:
         print(f"Проба LLM не удалась: {type(exc).__name__}", file=sys.stderr, flush=True)

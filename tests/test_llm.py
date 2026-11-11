@@ -65,9 +65,21 @@ class Reasoning(unittest.TestCase):
     def test_reasoning_never_returned_as_answer(self):
         self.script.append(reply(THOUGHT + "</think>\n\nДа, можно."))
         self.assertEqual(self.ask(), "Да, можно.")
-        self.script += [reply(THOUGHT, finish="length"), reply(THOUGHT, finish="length")]
+        self.script += [reply(THOUGHT, finish="length")] * 3
         with self.assertRaises(ValueError):
             self.ask()
+        self.assertEqual(self.seen[-1]["reasoning"], {"effort": "none"})
+
+    def test_reasoning_mode_raises_limits(self):
+        config = llm.config
+        saved = config.MAX_ANSWER_TOKENS, config.LLM_TIMEOUT, llm.MAX_TOKENS
+        try:
+            llm.reasoning_mode()
+            self.assertGreaterEqual(config.MAX_ANSWER_TOKENS, config.REASONING_MAX_TOKENS)
+            self.assertEqual(llm.MAX_TOKENS, config.MAX_ANSWER_TOKENS)
+            self.assertEqual(config.LLM_TIMEOUT, config.REASONING_TIMEOUT)
+        finally:
+            config.MAX_ANSWER_TOKENS, config.LLM_TIMEOUT, llm.MAX_TOKENS = saved
 
     def test_cut_answer_is_retried_with_full_budget(self):
         self.script += [reply("", finish="length", reasoning=THOUGHT), reply("Да.", reasoning=THOUGHT)]

@@ -196,9 +196,10 @@ class Routing(unittest.TestCase):
         messages = [{"role": "user", "content": "вопрос"}]
         platform = llm.chat_body(messages)
         # Какое поле понимает прокси платформы, неизвестно: шлём все, отвергнутое убирает _post_chat.
-        self.assertEqual(platform["chat_template_kwargs"], {"enable_thinking": False})
-        self.assertEqual(platform["reasoning"], {"effort": "none"})
-        self.assertEqual(platform["reasoning_effort"], "none")
+        effort = llm.config.REASONING_EFFORT
+        self.assertEqual(platform["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(platform["reasoning"], {"effort": effort})
+        self.assertEqual(platform["reasoning_effort"], effort)
         self.assertNotIn("provider", platform)
 
         saved = llm.BASE_URL, llm.LLM_PROVIDER
@@ -207,7 +208,7 @@ class Routing(unittest.TestCase):
             stand = llm.chat_body(messages)
         finally:
             llm.BASE_URL, llm.LLM_PROVIDER = saved
-        self.assertEqual(stand["reasoning"], {"effort": "none"})
+        self.assertEqual(stand["reasoning"], {"effort": effort})
         self.assertEqual(stand["provider"], {"order": ["deepinfra/bf16"], "allow_fallbacks": False})
 
 

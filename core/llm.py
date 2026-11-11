@@ -183,6 +183,13 @@ def chat(messages, max_tokens=None):
     return text
 
 
+def reasoning_mode():
+    """Запас токенов и времени под рассуждения: без него ответы обрезаются и уходят в запасной текст."""
+    global MAX_TOKENS
+    config.MAX_ANSWER_TOKENS = MAX_TOKENS = max(MAX_TOKENS, config.REASONING_MAX_TOKENS)
+    config.LLM_TIMEOUT = config.REASONING_TIMEOUT
+
+
 def reasoning_off():
     """Выключить рассуждения для оставшихся вопросов: страховка по времени прогона."""
     for key in _reasoning:

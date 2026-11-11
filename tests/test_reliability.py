@@ -124,7 +124,10 @@ class Budget(unittest.TestCase):
             self.assertEqual(llm.chat([{"role": "user", "content": "q"}]), "Да.")
         finally:
             llm._limits.clear()
-        self.assertEqual(seen, [400, 200])
+        expected = [llm.config.MAX_ANSWER_TOKENS]
+        while expected[-1] > 256:
+            expected.append(expected[-1] // 2)
+        self.assertEqual(seen, expected)
         self.assertTrue(llm._reasoning)  # reasoning switches are kept
 
     def test_backoff_has_jitter(self):
