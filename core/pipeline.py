@@ -36,14 +36,9 @@ def answer(index, history):
     hits = index.context(hits) if config.WHOLE_SECTIONS else hits[: config.TOP_K]
     searched = time.perf_counter()
 
-    materials = "\n\n".join(f"[{hit['crumb']}]\n{hit['text']}" for hit in hits)
-    text = _clean(
-        llm.chat(
-            [{"role": "system", "content": prompts.SYSTEM}]
-            + history[:-1]
-            + [{"role": "user", "content": prompts.user_turn(materials, question)}]
-        )
-    )
+    materials = "\n\n".join(f"[{number}] {hit['crumb']}\n{hit['text']}" for number, hit in enumerate(hits, 1))
+    messages = history[:-1] + [{"role": "user", "content": prompts.user_turn(materials, question)}]
+    text = _clean(llm.chat([{"role": "system", "content": prompts.SYSTEM}] + messages))
     finished = time.perf_counter()
 
     known = set(NUMBER.findall(materials + " ".join(turn["content"] for turn in history)))
