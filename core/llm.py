@@ -1,5 +1,6 @@
 """Клиент OpenAI-совместимого прокси: чат, эмбеддинги, реранк. Адреса и ключи только из env."""
 
+import concurrent.futures as cf
 import json
 import os
 import random
@@ -71,7 +72,10 @@ def _backoff(attempt, exc):
     return 2**attempt * (0.5 + random.random())
 
 
-def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
+wasted = []  # секунды неудачных попыток: по ним защита по времени отличает больной прокси от медленного
+
+
+def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None, retry_timeout=True):
     base_url = base_url or BASE_URL
     if not base_url:
         raise RuntimeError("Не задан LLM_BASE_URL")
@@ -82,6 +86,7 @@ def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
             if left <= 0.5:
                 raise BudgetExceeded(f"срок задачи истёк до запроса {path}")
             timeout_now = min(timeout_now, left)
+        sent = time.monotonic()
         try:
             response = _client.post(
                 base_url + path,
@@ -94,9 +99,12 @@ def _post(path, body, timeout=None, attempts=3, base_url=None, api_key=None):
                 return response.json()
             response.raise_for_status()
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            wasted.append(time.monotonic() - sent)
             retryable = not isinstance(exc, httpx.HTTPStatusError) or (
                 exc.response.status_code == 429 or exc.response.status_code >= 500
             )
+            if isinstance(exc, httpx.TimeoutException) and not retry_timeout:
+                retryable = False
             pause = _backoff(attempt, exc)
             left = _remaining()
             if not retryable or attempt == attempts - 1 or (left is not None and left < pause + 1):
@@ -121,21 +129,26 @@ _limits = {}  # потолок max_tokens, который принял прок�
 _OFF = {"reasoning": {"effort": "none"}, "reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}}
 
 
+def _reasons(body):
+    """В запросе рассуждения не выключены."""
+    return any(body.get(key) != value for key, value in _OFF.items() if key in body)
+
+
 def _post_chat(body):
     while True:
         if "max_tokens" in _limits:
             body["max_tokens"] = min(body["max_tokens"], _limits["max_tokens"])
         try:
             # Повторы ограничены сроком вопроса (set_deadline), а не числом попыток.
-            return _post("/chat/completions", body, attempts=3)
+            return _post("/chat/completions", body, attempts=3, retry_timeout=not _reasons(body))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (400, 422) and "max_tokens" in exc.response.text:
                 if body["max_tokens"] <= 64:
                     raise
                 # Прокси ограничивает длину ответа: уменьшаем лимит и запоминаем, а не теряем поля рассуждений.
-                _limits["max_tokens"] = body["max_tokens"] // 2
+                _limits["max_tokens"] = min(_limits.get("max_tokens", body["max_tokens"]), body["max_tokens"] // 2)
                 continue
-            sent = [key for key in _reasoning if key in body]
+            sent = [key for key in _OFF if key in body]
             if exc.response.status_code not in (400, 422) or not sent:
                 raise
             named = [key for key in sent if key in exc.response.text]
@@ -167,12 +180,18 @@ def thinks(result):
 
 def chat(messages, max_tokens=None):
     body = chat_body(messages, max_tokens)
-    text, cut = _answer(_post_chat(body))
-    if (not text or cut) and body["max_tokens"] < MAX_TOKENS:
-        # Рассуждения или длина съели лимит: повторяем один раз с запасом.
-        body["max_tokens"] = MAX_TOKENS
+    try:
         text, cut = _answer(_post_chat(body))
-    if (not text or cut) and any(body.get(key) != value for key, value in _OFF.items() if key in body):
+        if (not text or cut) and body["max_tokens"] < MAX_TOKENS:
+            # Рассуждения или длина съели лимит: повторяем один раз с запасом.
+            body["max_tokens"] = MAX_TOKENS
+            text, cut = _answer(_post_chat(body))
+    except httpx.TimeoutException:
+        if not _reasons(body):
+            raise
+        # Вызов с рассуждениями не уложился в тайм-аут: отвечаем без них, а не ждём его снова.
+        text, cut = "", True
+    if (not text or cut) and _reasons(body):
         # Рассуждения не уложились в лимит: последний шанс - тот же запрос без рассуждений, а не заглушка.
         body.update({key: _OFF[key] for key in body if key in _OFF})
         body["max_tokens"] = config.MAX_ANSWER_TOKENS_OFF
@@ -192,7 +211,7 @@ def reasoning_mode():
 
 def reasoning_off():
     """Выключить рассуждения для оставшихся вопросов: страховка по времени прогона."""
-    for key in _reasoning:
+    for key in list(_reasoning):
         _reasoning[key] = _OFF[key]
 
 
@@ -202,13 +221,25 @@ def probe():
     return thinks(_post_chat(body))
 
 
+embed_parallel = 1
+
+
 def embed(texts, batch_size=32):
-    vectors = []
-    for start in range(0, len(texts), batch_size):  # срок задаёт set_deadline вызывающего потока
-        batch = texts[start : start + batch_size]
-        data = _post("/embeddings", {"model": EMB_MODEL, "input": batch}, base_url=EMB_BASE_URL, api_key=EMB_API_KEY)["data"]
-        ordered = sorted(enumerate(data), key=lambda pair: pair[1].get("index", pair[0]))
-        vectors.extend(item["embedding"] for _, item in ordered)
+    """Пачки уходят по embed_parallel одновременно; состав пачек и порядок векторов от этого не зависят."""
+    deadline = getattr(_budget, "deadline", None)  # срок задаёт set_deadline вызывающего потока
+
+    def one(batch):
+        _budget.deadline = deadline
+        data = _post("/embeddings", {"model": EMB_MODEL, "input": batch}, timeout=config.EMB_TIMEOUT,
+                     base_url=EMB_BASE_URL, api_key=EMB_API_KEY)["data"]
+        return [item["embedding"] for _, item in sorted(enumerate(data), key=lambda pair: pair[1].get("index", pair[0]))]
+
+    batches = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
+    if embed_parallel > 1 and len(batches) > 1:
+        with cf.ThreadPoolExecutor(min(embed_parallel, len(batches))) as pool:
+            vectors = [vector for part in pool.map(one, batches) for vector in part]
+    else:
+        vectors = [vector for batch in batches for vector in one(batch)]
     matrix = np.asarray(vectors, dtype=np.float32)
     return matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-9)
 
@@ -219,7 +250,7 @@ def rerank(query, documents):
         "/rerank",
         {"model": RERANKER_MODEL, "query": query, "documents": documents, "top_n": len(documents)},
         timeout=config.RERANK_TIMEOUT,
-        attempts=1,
+        attempts=2,
     )
     return [int(item["index"]) for item in result.get("results", result.get("data", []))]
 

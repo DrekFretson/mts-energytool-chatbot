@@ -61,12 +61,19 @@ def workers_from_env():
         return 3
 
 
-def behind_schedule(elapsed, indexed, done, total, workers):
-    """Прогноз по темпу уже готовых ответов (они идут параллельно, старт не считается) выходит за REASONING_UNTIL_SEC.
-    Раньше двух волн по workers вопросов темп неточен, решения нет."""
-    if done < 2 * workers:
-        return False
-    return elapsed + (total - done) * (elapsed - indexed) / done > config.REASONING_UNTIL_SEC
+def behind_schedule(elapsed, unanswered, answered, workers):
+    """(пора отвечать без рассуждений, пора отказаться и от реранка): иначе оставшиеся вопросы не успеть к DEADLINE_SEC.
+
+    Решение принимается в последний момент, а не по прогнозу в начале прогона: если начать этот вопрос
+    с рассуждениями (SLOW_ANSWER_SEC), остальные без них ещё должны уложиться. Так медленный прокси отнимает
+    рассуждения у наименьшего числа вопросов. Быстрый вопрос стоит FAST_ANSWER_SEC плюс время, которое прокси
+    в среднем съедает на сбоях (тайм-ауты, 5xx): при зависающих вызовах защита срабатывает раньше.
+    Реранк отключается, только когда не успеть даже без рассуждений.
+    """
+    lost = sum(llm.wasted) / answered if answered >= 2 * workers else 0.0
+    rest = unanswered * (config.FAST_ANSWER_SEC + lost) / workers
+    limit = config.DEADLINE_SEC - config.RETRY_MARGIN_SEC
+    return elapsed + config.SLOW_ANSWER_SEC + rest > limit, elapsed + rest > limit
 
 
 def main():
@@ -86,22 +93,22 @@ def main():
 
     chunks = kb.load_chunks(find_file("knowledge-base.zip", "knowledge_base.zip", "kb.zip"))
     llm.set_deadline(config.STARTUP_EMBED_SEC)
+    workers = llm.embed_parallel = workers_from_env()
     index = retrieval.Index(chunks)
+    index.prefetch(text for raw in questions.values() for text in pipeline.query_texts(pipeline.parse_dialog(raw or "")))
     llm.set_deadline(None)
     print(f"Вопросов: {len(questions)}; фрагментов: {len(index.chunks)}; "
           f"индекс: {time.monotonic() - started:.1f} с", flush=True)
 
-    finished = []
+    answered = set()
+    llm.wasted.clear()
     budget = config.QUESTION_BUDGET_SEC * (1 if config.LLM_TIMEOUT < config.REASONING_TIMEOUT else 3)
 
-    indexed = time.monotonic() - started
-    workers = workers_from_env()
-
     def work(qid, question):
-        elapsed = time.monotonic() - started
-        if behind_schedule(elapsed, indexed, len(finished), len(questions), workers):
-            # Прогноз по уже готовым ответам не укладывается в лимит: дальше без рассуждений и без реранка (~25% времени вопроса).
+        hurry, skip_rerank = behind_schedule(time.monotonic() - started, len(questions) - len(answered), len(answered), workers)
+        if hurry:
             llm.reasoning_off()
+        if skip_rerank:
             config.USE_RERANK = False
         # Срок вопроса не дольше остатка до дедлайна: зависший вызов не держит поток после конца прогона.
         llm.set_deadline(min(budget, config.DEADLINE_SEC - (time.monotonic() - started)))
@@ -112,19 +119,20 @@ def main():
             return qid, ""
 
     pool = cf.ThreadPoolExecutor(max_workers=workers)
-    done, pending, flushed = 0, list(questions), time.monotonic()
+    done, pending, flushed, passes = 0, list(questions), time.monotonic(), 0
     # Второй и следующие проходы: упавшие из-за сбоев прокси вопросы повторяются, пока есть время.
     while pending and config.DEADLINE_SEC - (time.monotonic() - started) > (config.RETRY_MARGIN_SEC if done else 0):
+        passes += 1
         futures = [pool.submit(work, qid, questions[qid]) for qid in pending]
         failed = []
         try:
             for future in cf.as_completed(futures, timeout=max(1, config.DEADLINE_SEC - (time.monotonic() - started))):
                 qid, text = future.result()
-                finished.append(qid)
                 if not text:
                     failed.append(qid)
                     continue
                 answers[qid] = text[:MAX_ANSWER_CHARS]
+                answered.add(qid)
                 done += 1
                 if time.monotonic() - flushed > config.CSV_FLUSH_SEC:
                     write_csv(answers)
@@ -134,7 +142,7 @@ def main():
             break
         if failed and len(failed) < len(pending):
             print(f"Повторный проход: {len(failed)} вопросов", file=sys.stderr, flush=True)
-        elif failed:
+        elif failed and (len(pending) == len(questions) or passes >= 4):
             break  # ни один не прошёл: сбой не временный, повтор только тратит время
         pending = failed
 

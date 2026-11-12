@@ -52,15 +52,27 @@ class Questions(unittest.TestCase):
         self.assertEqual(self.read("qid,text\n7,вопрос\n"), {"7": "вопрос"})
         self.assertEqual(self.read(""), {})
 
-    def test_schedule_projection_uses_throughput(self):
-        until = solution.config.REASONING_UNTIL_SEC  # 840 s
-        # 6 of 100 done 40 s after a 10 s start: 5 s per question -> 40 + 94*5 = 510 s, on time
-        self.assertFalse(solution.behind_schedule(40, 10, 6, 100, 3))
-        # the old formula (elapsed / done) said 40 + 94*6.7 = 670 s; with a 100 s start it said 2000+ s
-        self.assertFalse(solution.behind_schedule(130, 100, 6, 100, 3))
-        self.assertTrue(solution.behind_schedule(100, 10, 6, 600, 3))  # 15 s per question x 594 left
-        self.assertFalse(solution.behind_schedule(100, 10, 5, 600, 3))  # too early to judge
-        self.assertGreater(until, 0)
+    def test_reasoning_is_dropped_as_late_as_possible(self):
+        c = solution.config
+        limit = c.DEADLINE_SEC - c.RETRY_MARGIN_SEC
+        saved, llm.wasted[:] = list(llm.wasted), []
+        try:
+            self.assertEqual(solution.behind_schedule(0, 100, 0, 3), (False, False))
+            self.assertEqual(solution.behind_schedule(600, 30, 70, 3), (False, False))
+            edge = limit - c.SLOW_ANSWER_SEC - 100 * c.FAST_ANSWER_SEC / 3
+            self.assertEqual(solution.behind_schedule(edge - 1, 100, 0, 3), (False, False))
+            self.assertEqual(solution.behind_schedule(edge + 1, 100, 0, 3), (True, False))
+            self.assertEqual(solution.behind_schedule(0, 600, 0, 3), (True, True))
+        finally:
+            llm.wasted[:] = saved
+
+    def test_time_lost_to_failures_brings_the_switch_forward(self):
+        saved, llm.wasted[:] = list(llm.wasted), [120.0] * 4
+        try:
+            self.assertEqual(solution.behind_schedule(150, 80, 20, 3), (True, False))
+            self.assertEqual(solution.behind_schedule(150, 80, 5, 3), (False, False))
+        finally:
+            llm.wasted[:] = saved
 
     def test_workers_garbage(self):
         for value, expected in (("abc", 3), ("0", 1), ("100", 8), ("", 3), ("5", 5)):
@@ -157,6 +169,29 @@ class DensePause(unittest.TestCase):
         for _ in range(6):
             self.assertTrue(index.search("текст"))
         self.assertEqual(len(calls), retrieval.DENSE_PAUSE_AFTER)
+
+
+class StartupEmbedding(unittest.TestCase):
+    def setUp(self):
+        load()
+        self.embed = llm.embed
+
+    def tearDown(self):
+        llm.embed = self.embed
+
+    def test_one_failed_round_does_not_leave_the_run_on_bm25(self):
+        chunks = [{"id": i, "section": i, "file": "a.md", "crumb": f"A > {i}", "text": f"текст {i}"} for i in range(5)]
+        calls = []
+
+        def flaky(texts, batch_size=32):
+            calls.append(len(texts))
+            if len(calls) == 1:
+                raise httpx.ConnectError("down")
+            return np.eye(len(texts), 16, dtype=np.float32)
+        llm.embed = flaky
+        index = retrieval.Index(chunks)
+        self.assertIsNotNone(index.vectors)
+        self.assertEqual(len(calls), 2)
 
 
 class RerankPause(unittest.TestCase):
