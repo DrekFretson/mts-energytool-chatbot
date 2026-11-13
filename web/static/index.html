@@ -10,21 +10,54 @@
   header { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e2e4e8; }
   header h1 { font-size: 17px; margin: 0; flex: 1; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  #log { scrollbar-width: none; -ms-overflow-style: none; }
+  #log::-webkit-scrollbar { display: none; }
   .msg { padding: 9px 13px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; }
   .user { align-self: flex-end; background: #e30611; color: #fff; }
   .assistant { align-self: flex-start; background: #eef0f3; }
+  .waiting { padding: 0; border-radius: 0; background: transparent; color: #4d5560; font-style: italic; }
+  #suggestions { display: flex; flex-wrap: wrap; gap: 8px; align-self: flex-start; max-width: 100%; }
+  #suggestions button {
+    min-height: 40px;
+    padding: 8px 14px;
+    border: 1px solid #e30611;
+    border-radius: 16px;
+    background: #fff;
+    color: #97000a;
+    text-align: left;
+    transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+  }
+  #suggestions button:hover,
+  #suggestions button:focus-visible {
+    border-color: #b0000d;
+    background: #fff4f4;
+    box-shadow: 0 0 0 2px rgb(227 6 17 / 16%);
+  }
+  #suggestions button:hover { transform: translateY(-1px); }
+  #suggestions button:focus-visible { outline: 2px solid #b0000d; outline-offset: 2px; }
+  #suggestions button:active { background: #ffe8e9; transform: translateY(0); }
   .debug { align-self: flex-start; font-size: 12.5px; color: #4d5560; border-left: 3px solid #c6cbd2; padding-left: 8px; white-space: pre-wrap; }
   form.send { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #e2e4e8; }
   form.send input { flex: 1; }
+  .send-action { box-sizing: border-box; flex: 0 0 112px; width: 112px; white-space: nowrap; }
   input, button { font: inherit; padding: 8px 12px; border: 1px solid #c6cbd2; border-radius: 8px; background: #fff; }
   button { cursor: pointer; }
   button.primary { background: #e30611; border-color: #e30611; color: #fff; }
   button:disabled { opacity: .55; cursor: default; }
-  dialog { border: 1px solid #c6cbd2; border-radius: 12px; max-width: 420px; }
-  dialog form { display: flex; flex-direction: column; gap: 10px; }
+  dialog { box-sizing: border-box; width: min(420px, calc(100vw - 32px)); min-width: 0; border: 1px solid #c6cbd2; border-radius: 12px; max-width: 420px; }
+  dialog form { display: flex; flex-direction: column; gap: 10px; width: 100%; min-width: 0; }
   dialog label { display: flex; flex-direction: column; gap: 3px; font-size: 14px; }
   dialog label.check { flex-direction: row; align-items: flex-start; gap: 8px; }
   .error { color: #b00020; font-size: 14px; min-height: 1em; }
+  .field-error { max-width: 100%; color: #b00020; font-size: 13px; min-height: 1.2em; overflow-wrap: anywhere; }
+  .field-error:empty { display: none; }
+  .field-hint { color: #4d5560; font-size: 13px; }
+  #lead-form input[aria-invalid="true"]:not(#lead-phone) { border-color: #b00020; box-shadow: 0 0 0 1px #b00020; }
+  .phone-input { display: flex; align-items: center; min-width: 0; border: 1px solid #c6cbd2; border-radius: 8px; background: #fff; }
+  .phone-prefix { padding: 8px 0 8px 12px; color: inherit; font: inherit; white-space: nowrap; }
+  .phone-input input { min-width: 0; width: 100%; flex: 1; border: 0; box-shadow: none; outline: none; }
+  .phone-input:focus-within { outline: 2px solid #b0000d; outline-offset: 1px; }
+  .phone-input[aria-invalid="true"] { border-color: #b00020; box-shadow: 0 0 0 1px #b00020; }
 </style>
 </head>
 <body>
@@ -38,33 +71,210 @@
   <div id="log" aria-live="polite"></div>
   <form class="send" id="send">
     <input id="text" maxlength="2000" required autocomplete="off" aria-label="Сообщение" placeholder="Опишите вашу задачу">
-    <button class="primary" id="submit">Отправить</button>
+    <button class="primary send-action" id="submit">Отправить</button>
+    <button class="primary send-action" id="cancel" type="button" hidden>Отмена</button>
   </form>
 </main>
 
 <dialog id="lead">
-  <form id="lead-form">
+  <form id="lead-form" novalidate>
     <strong>Заявка менеджеру</strong>
-    <label>ФИО <input name="name" required minlength="2" maxlength="200"></label>
-    <label>Телефон <input name="phone" required type="tel" maxlength="30" placeholder="+7 900 000-00-00"></label>
-    <label>Компания <input name="company" required maxlength="200"></label>
-    <label class="check"><input name="consent" type="checkbox" required> <span>Согласен на обработку персональных данных</span></label>
+    <label>ФИО
+      <input id="lead-name" name="name" required minlength="2" maxlength="200" aria-invalid="false" aria-describedby="name-error">
+      <span class="field-error" id="name-error" aria-live="polite"></span>
+    </label>
+    <label>Телефон
+      <span id="lead-phone-control" class="phone-input" aria-invalid="false">
+        <span class="phone-prefix" aria-hidden="true">+7</span>
+        <input id="lead-phone" name="phone" required type="tel" inputmode="numeric" maxlength="13" placeholder="900 000-00-00" aria-label="Телефон, 10 цифр после кода +7" aria-invalid="false" aria-describedby="phone-hint phone-error">
+      </span>
+      <span class="field-hint" id="phone-hint">Введите номер в формате +7 900 000-00-00</span>
+      <span class="field-error" id="phone-error" aria-live="polite"></span>
+    </label>
+    <label>Компания
+      <input id="lead-company" name="company" required maxlength="200" aria-invalid="false" aria-describedby="company-error">
+      <span class="field-error" id="company-error" aria-live="polite"></span>
+    </label>
+    <label class="check"><input id="lead-consent" name="consent" type="checkbox" required aria-invalid="false" aria-describedby="consent-error"> <span>Согласен на обработку персональных данных</span></label>
+    <span class="field-error" id="consent-error" aria-live="polite"></span>
     <div class="error" id="lead-error" role="alert"></div>
-    <button class="primary">Отправить заявку</button>
+    <button class="primary" id="lead-submit" type="submit">Отправить заявку</button>
     <button type="button" id="lead-close">Отмена</button>
   </form>
 </dialog>
 
 <script>
 const $ = (id) => document.getElementById(id);
+const QUICK_PROMPTS = [
+  "Выросли счета за свет — как снизить?",
+  "Как наладить учёт на нескольких объектах?",
+  "Нужны счётчики в СНТ",
+  "Как найти хищения электроэнергии?",
+];
+const TYPEWRITER_CHAR_DELAY_MS = 12;
+const ACTIVE_CHAT_STORAGE_KEY = "mts-energytool-active-chat-v1";
 let sessionId = null;
+let chatEntries = [];
+let activeRequestId = 0;
+let activeMessageController = null;
+let waitingDelayTimer = null;
+let waitingEndTimer = null;
+let waitingDotsTimer = null;
+let waitingMessage = null;
+let typewriterTimer = null;
+let typewriterMessage = null;
+let typewriterResolve = null;
+let typewriterEntry = null;
 
-function add(role, text) {
+function persistActiveChat() {
+  if (!sessionId) return;
+  try {
+    localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({ sessionId, entries: chatEntries }));
+  } catch {
+    // Storage can be disabled or full; the chat itself should continue working.
+  }
+}
+
+function readActiveChat() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY) || "null");
+    if (!saved || typeof saved.sessionId !== "string" || !saved.sessionId || !Array.isArray(saved.entries)) return null;
+    const entries = saved.entries.filter((entry) => entry &&
+      (entry.role === "user" || entry.role === "assistant") && typeof entry.text === "string");
+    return { sessionId: saved.sessionId, entries };
+  } catch {
+    return null;
+  }
+}
+
+function clearWaiting() {
+  clearTimeout(waitingDelayTimer);
+  clearTimeout(waitingEndTimer);
+  clearInterval(waitingDotsTimer);
+  waitingDelayTimer = null;
+  waitingEndTimer = null;
+  waitingDotsTimer = null;
+  waitingMessage?.remove();
+  waitingMessage = null;
+}
+
+function clearTypewriter(removeMessage = true) {
+  clearTimeout(typewriterTimer);
+  typewriterTimer = null;
+  if (removeMessage) typewriterMessage?.remove();
+  typewriterMessage = null;
+  if (typewriterEntry) {
+    const entryIndex = chatEntries.lastIndexOf(typewriterEntry);
+    if (entryIndex !== -1) {
+      chatEntries.splice(entryIndex, 1);
+      persistActiveChat();
+    }
+    typewriterEntry = null;
+  }
+  if (typewriterResolve) {
+    const resolve = typewriterResolve;
+    typewriterResolve = null;
+    resolve(false);
+  }
+}
+
+function startWaiting(requestId) {
+  clearWaiting();
+  waitingMessage = document.createElement("div");
+  waitingMessage.className = "msg assistant waiting";
+  waitingMessage.setAttribute("role", "status");
+  waitingMessage.setAttribute("aria-live", "polite");
+  $("log").append(waitingMessage);
+  waitingMessage.scrollIntoView({ block: "nearest" });
+
+  function animatePhrase(phrase) {
+    clearInterval(waitingDotsTimer);
+    let dot = 0;
+    const dots = [".", "..", "..."];
+    const update = () => {
+      if (!waitingMessage || requestId !== activeRequestId) return;
+      waitingMessage.textContent = `${phrase}${dots[dot]}`;
+      dot = (dot + 1) % dots.length;
+    };
+    update();
+    waitingDotsTimer = setInterval(update, 600);
+  }
+
+  animatePhrase("Ищу в материалах");
+  waitingDelayTimer = setTimeout(() => {
+    if (requestId !== activeRequestId || !waitingMessage) return;
+    animatePhrase("Обдумываю ответ");
+  }, 3000);
+
+  waitingEndTimer = setTimeout(() => {
+    if (requestId !== activeRequestId || !waitingMessage) return;
+    clearInterval(waitingDotsTimer);
+    waitingDotsTimer = null;
+    waitingMessage.textContent = "Ещё немного…";
+  }, 15000);
+}
+
+function add(role, text, persist = true) {
   const node = document.createElement("div");
   node.className = "msg " + role;
   node.textContent = text;
   $("log").append(node);
   node.scrollIntoView();
+  if (persist && (role === "user" || role === "assistant")) {
+    chatEntries.push({ role, text: String(text) });
+    persistActiveChat();
+  }
+}
+
+function addProgressively(text, requestId) {
+  clearTypewriter();
+  const node = document.createElement("div");
+  node.className = "msg assistant";
+  node.setAttribute("aria-live", "off");
+  $("log").append(node);
+  typewriterMessage = node;
+  const fullText = String(text ?? "");
+  const characters = Array.from(fullText);
+  typewriterEntry = { role: "assistant", text: fullText };
+  chatEntries.push(typewriterEntry);
+  persistActiveChat();
+
+  return new Promise((resolve) => {
+    typewriterResolve = resolve;
+    let index = 0;
+    const revealNext = () => {
+      if (requestId !== activeRequestId) {
+        clearTypewriter();
+        return;
+      }
+      if (index >= characters.length) {
+        node.setAttribute("aria-live", "polite");
+        typewriterMessage = null;
+        typewriterEntry = null;
+        typewriterTimer = null;
+        typewriterResolve = null;
+        resolve(true);
+        return;
+      }
+
+      node.textContent += characters[index];
+      index += 1;
+      if (index === 1 || index % 8 === 0 || index === characters.length) {
+        node.scrollIntoView({ block: "nearest" });
+      }
+      if (index === characters.length) {
+        node.setAttribute("aria-live", "polite");
+        typewriterMessage = null;
+        typewriterEntry = null;
+        typewriterTimer = null;
+        typewriterResolve = null;
+        resolve(true);
+        return;
+      }
+      typewriterTimer = setTimeout(revealNext, TYPEWRITER_CHAR_DELAY_MS);
+    };
+    revealNext();
+  });
 }
 
 function addDebug(debug) {
@@ -78,21 +288,69 @@ function addDebug(debug) {
   node.scrollIntoView();
 }
 
-async function api(path, body, headers = {}) {
+function showWelcome() {
+  add("assistant", "Здравствуйте! Расскажите, какую задачу хотите решить: снизить расходы на электроэнергию, наладить учёт, найти потери или что-то ещё?", false);
+  const suggestions = document.createElement("div");
+  suggestions.id = "suggestions";
+  suggestions.setAttribute("role", "group");
+  suggestions.setAttribute("aria-label", "Примеры вопросов консультанту");
+  QUICK_PROMPTS.forEach((prompt) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = prompt;
+    button.addEventListener("click", () => {
+      $("text").value = prompt;
+      $("send").requestSubmit();
+    });
+    suggestions.append(button);
+  });
+  $("log").append(suggestions);
+}
+
+async function api(path, body, headers = {}, signal) {
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body ?? {}),
+    signal,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Проверьте введённые данные");
   return data;
 }
 
-async function newDialog() {
+async function newDialog(restoreLast = false) {
+  const dialogRequestId = ++activeRequestId;
+  activeMessageController?.abort();
+  activeMessageController = null;
+  clearWaiting();
+  clearTypewriter();
+  $("cancel").hidden = true;
+  $("cancel").disabled = false;
+  $("submit").hidden = false;
+  sessionId = null;
+  chatEntries = [];
+  $("submit").disabled = true;
   $("log").replaceChildren();
-  sessionId = (await api("/api/sessions")).id;
-  add("assistant", "Здравствуйте! Расскажите, какую задачу хотите решить: снизить расходы на электроэнергию, наладить учёт, найти потери или что-то ещё?");
+  try {
+    const saved = restoreLast ? readActiveChat() : null;
+    if (saved) {
+      sessionId = saved.sessionId;
+      chatEntries = saved.entries;
+      chatEntries.forEach((entry) => add(entry.role, entry.text, false));
+      if (!chatEntries.some((entry) => entry.role === "user")) showWelcome();
+      persistActiveChat();
+      return;
+    }
+
+    const createdSessionId = (await api("/api/sessions")).id;
+    if (dialogRequestId !== activeRequestId) return;
+    sessionId = createdSessionId;
+    persistActiveChat();
+    showWelcome();
+  } finally {
+    if (dialogRequestId === activeRequestId) $("submit").disabled = false;
+  }
 }
 
 $("debug").addEventListener("change", (event) => {
@@ -105,45 +363,223 @@ $("debug").addEventListener("change", (event) => {
 $("send").addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = $("text").value.trim();
-  if (!text) return;
+  if (!text || !sessionId || activeMessageController) return;
+  const requestId = ++activeRequestId;
+  const controller = new AbortController();
+  activeMessageController = controller;
+  clearWaiting();
+  clearTypewriter();
+  $("suggestions")?.remove();
   $("text").value = "";
-  $("submit").disabled = true;
+  $("submit").hidden = true;
+  $("cancel").hidden = false;
+  $("cancel").disabled = false;
   add("user", text);
+  startWaiting(requestId);
   try {
     const headers = $("debug").checked ? { "X-Debug-Token": sessionStorage.debugToken } : {};
-    const reply = await api(`/api/sessions/${sessionId}/messages`, { text }, headers);
-    add("assistant", reply.text);
+    const reply = await api(`/api/sessions/${sessionId}/messages`, { text }, headers, controller.signal);
+    if (requestId !== activeRequestId) return;
+    clearWaiting();
+    $("cancel").disabled = true;
+    await addProgressively(reply.text, requestId);
+    if (requestId !== activeRequestId) return;
     if (reply.debug) addDebug(reply.debug);
     if (reply.offer_lead) add("assistant", "Если хотите, передам ваш запрос менеджеру с резюме диалога: нажмите «Связаться с менеджером».");
   } catch (error) {
-    add("assistant", "Не получилось ответить. Попробуйте ещё раз.");
+    if (requestId === activeRequestId && error.name !== "AbortError") {
+      clearWaiting();
+      clearTypewriter();
+      add("assistant", "Не получилось ответить. Попробуйте ещё раз.");
+    }
   } finally {
-    $("submit").disabled = false;
-    $("text").focus();
+    if (requestId === activeRequestId) {
+      activeMessageController = null;
+      clearWaiting();
+      $("submit").hidden = false;
+      $("submit").disabled = false;
+      $("cancel").hidden = true;
+      $("cancel").disabled = false;
+      $("text").focus();
+    }
   }
 });
 
-$("reset").addEventListener("click", newDialog);
-$("lead-open").addEventListener("click", () => $("lead").showModal());
+$("cancel").addEventListener("click", () => {
+  if (!activeMessageController || $("cancel").disabled) return;
+  activeRequestId += 1;
+  const controller = activeMessageController;
+  activeMessageController = null;
+  controller.abort();
+  clearWaiting();
+  clearTypewriter();
+  $("submit").hidden = false;
+  $("submit").disabled = false;
+  $("cancel").hidden = true;
+  $("cancel").disabled = false;
+  $("text").focus();
+});
+
+$("reset").addEventListener("click", () => newDialog(false));
+const LEAD_FIELDS = [
+  {
+    input: "lead-name",
+    error: "name-error",
+    isValid: (value) => (value.trim().match(/\p{L}/gu) || []).length >= 2,
+    errorText: "Введите ФИО — минимум 2 буквы",
+  },
+  {
+    input: "lead-phone",
+    error: "phone-error",
+    isValid: (value) => {
+      const digits = value.replace(/\D/g, "");
+      return value.length <= 13 && digits.length === 10;
+    },
+    errorText: "Проверьте номер телефона",
+  },
+  {
+    input: "lead-company",
+    error: "company-error",
+    isValid: (value) => value.trim().length > 0,
+    errorText: "Укажите компанию",
+  },
+];
+let leadValidationActive = false;
+let leadSubmitting = false;
+
+function setLeadFieldError(inputId, errorId, message) {
+  $(inputId).setAttribute("aria-invalid", String(Boolean(message)));
+  if (inputId === "lead-phone") $("lead-phone-control").setAttribute("aria-invalid", String(Boolean(message)));
+  $(errorId).textContent = message;
+}
+
+function validateLeadField(field) {
+  const valid = field.isValid($(field.input).value);
+  setLeadFieldError(field.input, field.error, valid ? "" : field.errorText);
+  return valid;
+}
+
+function validateLeadForm() {
+  let firstInvalid = null;
+  LEAD_FIELDS.forEach((field) => {
+    if (!validateLeadField(field) && !firstInvalid) firstInvalid = $(field.input);
+  });
+  const consentValid = $("lead-consent").checked;
+  setLeadFieldError("lead-consent", "consent-error", consentValid ? "" : "Подтвердите согласие на обработку персональных данных");
+  if (!consentValid && !firstInvalid) firstInvalid = $("lead-consent");
+  return firstInvalid;
+}
+
+function clearLeadErrors() {
+  LEAD_FIELDS.forEach((field) => setLeadFieldError(field.input, field.error, ""));
+  setLeadFieldError("lead-consent", "consent-error", "");
+}
+
+function formatPhoneInput(isPaste = false) {
+  const input = $("lead-phone");
+  const raw = input.value;
+  const caret = input.selectionStart ?? raw.length;
+  let digits = raw.replace(/\D/g, "");
+  let digitsBeforeCaret = raw.slice(0, caret).replace(/\D/g, "").length;
+  const hasExplicitCountryPrefix = /^\s*\+/.test(raw);
+
+  if ((hasExplicitCountryPrefix || (isPaste && digits.length === 11)) && /^[78]/.test(digits)) {
+    digits = digits.slice(1);
+    if (hasExplicitCountryPrefix && digitsBeforeCaret > 0) digitsBeforeCaret -= 1;
+  }
+  digits = digits.slice(0, 10);
+  digitsBeforeCaret = Math.min(digitsBeforeCaret, digits.length);
+
+  let formatted = digits.slice(0, 3);
+  if (digits.length > 3) formatted += ` ${digits.slice(3, 6)}`;
+  if (digits.length > 6) formatted += `-${digits.slice(6, 8)}`;
+  if (digits.length > 8) formatted += `-${digits.slice(8, 10)}`;
+
+  let formattedCaret = digitsBeforeCaret;
+  let seenDigits = 0;
+  for (let index = 0; index < formatted.length; index += 1) {
+    if (/\d/.test(formatted[index])) seenDigits += 1;
+    if (seenDigits === digitsBeforeCaret) {
+      formattedCaret = index + 1;
+      break;
+    }
+  }
+  if (formatted[formattedCaret] === " " || formatted[formattedCaret] === "-") formattedCaret += 1;
+
+  input.value = formatted;
+  input.setSelectionRange(formattedCaret, formattedCaret);
+  if (leadValidationActive) validateLeadField(LEAD_FIELDS[1]);
+}
+
+$("lead-phone").addEventListener("paste", (event) => {
+  event.preventDefault();
+  const input = $("lead-phone");
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  input.value = input.value.slice(0, start) + event.clipboardData.getData("text") + input.value.slice(end);
+  input.setSelectionRange(input.value.length, input.value.length);
+  formatPhoneInput(true);
+});
+
+LEAD_FIELDS.filter((field) => field.input !== "lead-phone").forEach((field) => $(field.input).addEventListener("input", () => {
+  if (leadValidationActive) validateLeadField(field);
+}));
+$("lead-phone").addEventListener("input", () => formatPhoneInput());
+$("lead-consent").addEventListener("change", () => {
+  if (leadValidationActive) {
+    const valid = $("lead-consent").checked;
+    setLeadFieldError("lead-consent", "consent-error", valid ? "" : "Подтвердите согласие на обработку персональных данных");
+  }
+});
+
+$("lead-open").addEventListener("click", () => {
+  leadValidationActive = false;
+  clearLeadErrors();
+  $("lead-error").textContent = "";
+  $("lead").showModal();
+});
 $("lead-close").addEventListener("click", () => $("lead").close());
 
 $("lead-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.target);
+  if (leadSubmitting) return;
+  leadValidationActive = true;
   $("lead-error").textContent = "";
+  const firstInvalid = validateLeadForm();
+  if (firstInvalid) {
+    firstInvalid.focus();
+    return;
+  }
+  const button = $("lead-submit");
+  leadSubmitting = true;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  const form = new FormData(event.target);
   try {
     await api(`/api/sessions/${sessionId}/lead`, {
-      name: form.get("name"), phone: form.get("phone"), company: form.get("company"), consent: form.has("consent"),
+      name: form.get("name"), phone: `+7 ${form.get("phone")}`, company: form.get("company"), consent: form.has("consent"),
     });
     $("lead").close();
     event.target.reset();
+    clearLeadErrors();
+    leadValidationActive = false;
     add("assistant", "Заявка передана менеджеру вместе с резюме диалога.");
   } catch (error) {
-    $("lead-error").textContent = error.message;
+    if (/телефон|номер/i.test(error.message)) {
+      setLeadFieldError("lead-phone", "phone-error", error.message);
+    } else if (/согласие/i.test(error.message)) {
+      setLeadFieldError("lead-consent", "consent-error", error.message);
+    } else {
+      $("lead-error").textContent = error.message;
+    }
+  } finally {
+    leadSubmitting = false;
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
   }
 });
 
-newDialog();
+newDialog(true);
 </script>
 </body>
 </html>
