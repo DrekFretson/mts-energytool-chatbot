@@ -3,64 +3,433 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>История сессий</title>
+<title>История сессий — МТС EnergyTool</title>
 <style>
-  body { font: 15px/1.45 system-ui, sans-serif; margin: 24px auto; max-width: 960px; padding: 0 16px; color: #1d2023; }
-  table { border-collapse: collapse; width: 100%; }
-  td, th { border-bottom: 1px solid #e2e4e8; padding: 6px 8px; text-align: left; }
-  button, input { font: inherit; padding: 6px 10px; }
-  pre { white-space: pre-wrap; background: #f4f5f7; padding: 12px; border-radius: 8px; }
+  :root { color-scheme: light; font: 15px/1.5 system-ui, sans-serif; color: #1d2023; background: #f4f5f7; }
+  * { box-sizing: border-box; }
+  body { max-width: 1080px; margin: 24px auto; padding: 0 16px 32px; }
+  h1 { margin: 0 0 18px; font-size: 1.6rem; }
+  h2 { margin: 24px 0 10px; font-size: 1.2rem; }
+  button, input { font: inherit; }
+  button { min-height: 40px; padding: 7px 12px; border: 1px solid #aeb5be; border-radius: 7px; background: #fff; color: #1d2023; cursor: pointer; }
+  button:hover { background: #f1f3f5; }
+  button:focus-visible, input:focus-visible, summary:focus-visible, .table-wrap:focus-visible { outline: 3px solid #9b0010; outline-offset: 2px; }
+  input[type="password"] { min-height: 40px; min-width: min(280px, 100%); padding: 7px 10px; border: 1px solid #8d959f; border-radius: 7px; background: #fff; color: inherit; }
+  #auth { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  #error, .notice { color: #8d0010; }
+  #error:empty, .notice:empty { display: none; }
+  .session-tools { display: flex; justify-content: flex-end; margin: 12px 0; }
+  .session-search { width: min(360px, 100%); min-height: 40px; padding: 7px 10px; border: 1px solid #8d959f; border-radius: 7px; background: #fff; color: inherit; }
+  .lead-heading { white-space: nowrap; }
+  .filter-anchor { display: inline-flex; align-items: center; }
+  .filter-trigger { display: inline-grid; place-items: center; width: 24px; min-height: 24px; margin-left: 5px; padding: 0; border-color: #c7cdd4; border-radius: 6px; color: #4d5560; vertical-align: middle; }
+  .filter-trigger:hover, .filter-trigger[aria-expanded="true"] { border-color: #8d0010; background: #fff4f4; color: #8d0010; }
+  .filter-popup { position: fixed; z-index: 20; top: 0; left: 0; min-width: 160px; padding: 10px 12px; border: 1px solid #d0d5db; border-radius: 9px; background: #fff; box-shadow: 0 8px 24px rgb(29 32 35 / 18%); }
+  .filter-popup[hidden] { display: none; }
+  .filter-popup fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+  .filter-option { display: flex; align-items: center; gap: 9px; min-height: 32px; cursor: pointer; }
+  .filter-option input { width: 18px; height: 18px; margin: 0; accent-color: #b0000d; }
+  .table-wrap { overflow-x: auto; border: 1px solid #d6dbe1; border-radius: 8px; background: #fff; }
+  table { width: 100%; min-width: 620px; border-collapse: collapse; }
+  th, td { padding: 9px 10px; border-bottom: 1px solid #e2e4e8; text-align: left; vertical-align: top; }
+  th { background: #f7f8fa; font-weight: 650; }
+  .id-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .refresh-button { flex: 0 0 auto; width: 30px; min-height: 30px; padding: 2px; font-size: 16px; line-height: 1; color: #4d5560; }
+  .refresh-button:hover { border-color: #8d0010; color: #8d0010; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .session-open { min-height: 34px; padding: 4px 8px; border-color: transparent; color: #8d0010; font-family: ui-monospace, monospace; overflow-wrap: anywhere; text-align: left; }
+  #detail { margin-top: 22px; }
+  #session-list-view[hidden], #detail[hidden], #lead-detail[hidden] { display: none; }
+  .back-button { margin-bottom: 8px; }
+  .history-disclosure { margin: 10px 0; }
+  .history-toggle { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 9px; border: 1px solid #c7cdd4; border-radius: 7px; color: #4d5560; font-size: 14px; font-weight: 500; list-style: none; cursor: pointer; }
+  .history-toggle::-webkit-details-marker { display: none; }
+  .history-toggle:hover { border-color: #8d0010; background: #fff4f4; color: #8d0010; }
+  .history-toggle:focus-visible { outline: 3px solid #9b0010; outline-offset: 2px; }
+  .conversation { display: grid; gap: 10px; }
+  .message { min-width: 0; padding: 10px 12px; border: 1px solid #e0e4e8; border-radius: 9px; background: #fff; }
+  .message-head { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 5px; color: #4d5560; font-size: .9rem; }
+  .message-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  details { margin-top: 10px; }
+  details summary { width: fit-content; border-radius: 4px; color: #7c0010; cursor: pointer; }
+  .diagnostics { margin: 8px 0 0; padding: 10px 12px; border-left: 3px solid #b8bec6; background: #f7f8fa; overflow-wrap: anywhere; }
+  .diagnostics p { margin: 4px 0; }
+  .diagnostics ul { margin: 4px 0 8px; padding-left: 20px; }
+  .lead-card { margin-top: 16px; padding: 14px; border: 1px solid #d6dbe1; border-radius: 9px; background: #fff; }
+  .lead-card h3 { margin: 0 0 8px; }
+  .lead-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 4px 16px; }
+  .lead-fields p { margin: 2px 0; overflow-wrap: anywhere; }
+  .summary-text { margin: 8px 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .copy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .copy-button { border-color: #b0000d; color: #85000a; }
+  .copy-status { min-height: 1.4em; color: #285c34; }
+  .copy-status[data-error="true"] { color: #8d0010; }
+  @media (max-width: 560px) {
+    body { margin-top: 16px; padding-right: 12px; padding-left: 12px; }
+    h1 { font-size: 1.35rem; }
+    #auth { align-items: stretch; }
+    #auth input[type="password"] { width: 100%; min-width: 0; }
+    #auth button { width: 100%; }
+    .session-tools { justify-content: stretch; }
+    .session-search { width: 100%; }
+    th, td { padding: 8px; }
+  }
 </style>
 </head>
 <body>
 <h1>История сессий</h1>
-<form id="auth">
-  <input id="token" type="password" required aria-label="Токен отладки" placeholder="Токен отладки">
-  <button>Показать</button> <span id="error" role="alert"></span>
+<section id="session-list-view" aria-label="Список сессий">
+<form id="auth" aria-describedby="error">
+  <input id="token" type="password" required autocomplete="current-password" aria-label="Токен отладки" placeholder="Токен отладки">
+  <button id="auth-submit" type="submit">Загрузить сессии</button>
+  <span id="error" role="alert"></span>
 </form>
-<table><thead><tr><th>Создана</th><th>Сообщений</th><th>Заявка</th><th>ID</th></tr></thead><tbody id="rows"></tbody></table>
-<pre id="detail" hidden></pre>
+<div class="session-tools">
+  <input id="session-search" class="session-search" type="search" autocomplete="off" aria-label="Поиск по ID сессии" placeholder="Поиск по ID сессии">
+</div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Список сессий, прокручиваемая таблица">
+  <table aria-label="Сессии чата">
+    <thead><tr>
+      <th scope="col">Дата</th>
+      <th scope="col">Сообщений</th>
+      <th scope="col" class="lead-heading"><div id="filter-control" class="filter-anchor"><span>Заявка</span><button id="filter-trigger" class="filter-trigger" type="button" aria-expanded="false" aria-controls="filter-popup" aria-label="Фильтр по наличию заявки" title="Фильтр по наличию заявки"><span aria-hidden="true">▾</span></button>
+        <div id="filter-popup" class="filter-popup" role="group" aria-label="Фильтр по наличию заявки" hidden>
+          <fieldset>
+            <label class="filter-option"><input id="filter-has-lead" type="checkbox" checked> Да</label>
+            <label class="filter-option"><input id="filter-no-lead" type="checkbox" checked> Нет</label>
+          </fieldset>
+        </div>
+      </div></th>
+      <th scope="col" class="lead-heading"><div id="review-filter-control" class="filter-anchor"><span>Рассмотрена</span><button id="review-filter-trigger" class="filter-trigger" type="button" aria-expanded="false" aria-controls="review-filter-popup" aria-label="Фильтр по рассмотренной заявке" title="Фильтр по рассмотренной заявке"><span aria-hidden="true">▾</span></button><div id="review-filter-popup" class="filter-popup" role="group" aria-label="Фильтр по рассмотренной заявке" hidden><fieldset><label class="filter-option"><input id="review-yes" type="checkbox" checked> Да</label><label class="filter-option"><input id="review-no" type="checkbox" checked> Нет</label></fieldset></div></div></th>
+      <th scope="col"><div class="id-heading"><span>ID сессии</span><button id="refresh-sessions" class="refresh-button" type="button" aria-label="Обновить таблицу сессий" title="Обновить таблицу сессий">⭯</button></div></th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+</section>
+<section id="detail" aria-labelledby="detail-title" hidden>
+  <button id="detail-back" class="back-button" type="button">← К списку сессий</button>
+  <h2 id="detail-title" tabindex="-1">Переписка</h2>
+  <details id="history-disclosure" class="history-disclosure">
+    <summary id="history-toggle" class="history-toggle">▼ Открыть историю чата</summary>
+    <div id="conversation" class="conversation" aria-live="polite"></div>
+  </details>
+  <section id="lead-detail" class="lead-card" aria-labelledby="lead-heading" hidden></section>
+</section>
 <script>
 const $ = (id) => document.getElementById(id);
-const when = (seconds) => new Date(seconds * 1000).toLocaleString("ru-RU");
+let loadedSessions = [];
+let activeDetailRequest = 0;
+let sessionsLoading = false;
+
+function when(seconds) {
+  const date = new Date(Number(seconds) * 1000);
+  if (!Number.isFinite(date.getTime())) return "";
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).map(({ type, value }) => [type, value]));
+  return `${parts.day}.${parts.month} ${parts.hour}:${parts.minute}`;
+}
 
 async function get(path) {
   const response = await fetch(path, { headers: { "X-Debug-Token": $("token").value } });
-  if (!response.ok) throw new Error("Доступ запрещён");
+  if (!response.ok) throw new Error("Доступ запрещён. Проверьте токен отладки.");
   return response.json();
 }
 
-async function show(id) {
-  const data = await get(`/api/admin/sessions/${id}`);
-  const lines = data.messages.map((m) => `${when(m.created_at)} ${m.role === "user" ? "Клиент" : "Бот"}: ${m.content}`);
-  if (data.lead) lines.push("", `ЗАЯВКА: ${data.lead.name}, ${data.lead.phone}, ${data.lead.company}`, data.lead.summary);
-  $("detail").textContent = lines.join("\n");
-  $("detail").hidden = false;
+function textElement(tag, text, className) {
+  const element = document.createElement(tag);
+  element.textContent = text == null ? "" : String(text);
+  if (className) element.className = className;
+  return element;
 }
 
-$("auth").addEventListener("submit", async (event) => {
-  event.preventDefault();
+function formatSummary(text) {
+  return String(text ?? "").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm, "$1: ");
+}
+
+function parseMeta(raw) {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function addDiagnostic(meta, container) {
+  if (!meta) return;
+  const diagnostics = document.createElement("div");
+  diagnostics.className = "diagnostics";
+  let hasData = false;
+  const addLine = (label, value) => {
+    const line = document.createElement("p");
+    line.append(textElement("strong", `${label}: `), document.createTextNode(String(value)));
+    diagnostics.append(line);
+    hasData = true;
+  };
+
+  if (meta.timings && typeof meta.timings === "object" && !Array.isArray(meta.timings)) {
+    const labels = { search_ms: "Поиск, мс", llm_ms: "Ответ модели, мс", total_ms: "Всего, мс" };
+    for (const [key, value] of Object.entries(meta.timings)) {
+      if (typeof value === "number" && Number.isFinite(value)) addLine(labels[key] || key, value);
+    }
+  }
+
+  if (Array.isArray(meta.sources) && meta.sources.length) {
+    const heading = textElement("strong", "Найденные документы");
+    diagnostics.append(heading);
+    const list = document.createElement("ul");
+    meta.sources.forEach((source) => {
+      if (!source || typeof source !== "object" || Array.isArray(source)) return;
+      const parts = [];
+      if (typeof source.file === "string" && source.file) parts.push(source.file);
+      if (typeof source.crumb === "string" && source.crumb) parts.push(source.crumb);
+      if ((typeof source.score === "number" && Number.isFinite(source.score)) || typeof source.score === "string") {
+        parts.push(`Оценка: ${source.score}`);
+      }
+      if (parts.length) list.append(textElement("li", parts.join(" — ")));
+    });
+    if (list.childElementCount) {
+      diagnostics.append(list);
+      hasData = true;
+    } else {
+      heading.remove();
+    }
+  }
+
+  if (Array.isArray(meta.unverified_numbers) && meta.unverified_numbers.length) {
+    addLine("Непроверенные числа", meta.unverified_numbers.map(String).join(", "));
+  }
+  if (typeof meta.degraded === "boolean") addLine("Запасной ответ", meta.degraded ? "да" : "нет");
+  if (typeof meta.route === "string" && meta.route.trim()) addLine("Маршрут", meta.route);
+  if (typeof meta.route_reason === "string" && meta.route_reason.trim()) addLine("Причина маршрута", meta.route_reason);
+  if (!hasData) return;
+
+  const disclosure = document.createElement("details");
+  const summary = textElement("summary", "Диагностика ответа");
+  disclosure.setAttribute("aria-label", "Диагностика ответа консультанта");
+  disclosure.append(summary, diagnostics);
+  container.append(disclosure);
+}
+
+function renderMessage(message) {
+  const article = document.createElement("article");
+  article.className = "message";
+  const header = document.createElement("div");
+  header.className = "message-head";
+  header.append(textElement("strong", message.role === "user" ? "Клиент" : message.role === "manager" ? "Менеджер" : "Консультант"));
+  const timestamp = when(message.created_at);
+  if (timestamp) header.append(textElement("time", timestamp));
+  article.append(header, textElement("p", message.content, "message-body"));
+  if (message.role === "assistant") addDiagnostic(parseMeta(message.meta), article);
+  return article;
+}
+
+function renderLead(lead) {
+  const panel = $("lead-detail");
+  panel.replaceChildren();
+  panel.hidden = !lead;
+  if (!lead) return;
+
+  const heading = textElement("h3", "Заявка менеджеру");
+  heading.id = "lead-heading";
+  panel.append(heading);
+  const fields = document.createElement("div");
+  fields.className = "lead-fields";
+  for (const [label, value] of [["ФИО", lead.name], ["Телефон", lead.phone], ["Компания", lead.company]]) {
+    if (value === undefined || value === null) continue;
+    const line = document.createElement("p");
+    line.append(textElement("strong", `${label}: `), document.createTextNode(String(value)));
+    fields.append(line);
+  }
+  panel.append(fields);
+
+  if (typeof lead.summary === "string") {
+    panel.append(textElement("h4", "Резюме"), textElement("p", formatSummary(lead.summary), "summary-text"));
+    const actions = document.createElement("div");
+    actions.className = "copy-row";
+    const copy = textElement("button", "Скопировать резюме", "copy-button");
+    copy.type = "button";
+    copy.setAttribute("aria-label", "Скопировать резюме заявки в буфер обмена");
+    const status = textElement("span", "", "copy-status");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    copy.addEventListener("click", async () => {
+      status.textContent = "";
+      status.removeAttribute("data-error");
+      try {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") throw new Error("clipboard unavailable");
+        await navigator.clipboard.writeText(lead.summary);
+        status.textContent = "Резюме скопировано.";
+      } catch {
+        status.setAttribute("data-error", "true");
+        status.textContent = "Не удалось скопировать резюме. Проверьте разрешение браузера.";
+      }
+    });
+    actions.append(copy, status);
+    panel.append(actions);
+  }
+}
+
+function renderSessions() {
+  const rows = $("rows");
+  const sessions = loadedSessions.slice().sort((a, b) => Number(b.created_at) - Number(a.created_at));
+  const includeWithLead = $("filter-has-lead").checked;
+  const includeWithoutLead = $("filter-no-lead").checked;
+  const search = $("session-search").value.trim().toLocaleLowerCase();
+  const visible = sessions.filter((session) => {
+    const matchesLead = session.has_lead ? includeWithLead : includeWithoutLead;
+    const matchesReview = session.reviewed ? $("review-yes").checked : $("review-no").checked;
+    return matchesLead && matchesReview && String(session.id).toLocaleLowerCase().startsWith(search);
+  });
+  if (!visible.length) {
+    const row = document.createElement("tr");
+    const cell = textElement("td", "Нет сессий с выбранными фильтрами.");
+    cell.colSpan = 5;
+    row.append(cell);
+    rows.replaceChildren(row);
+    return;
+  }
+
+  rows.replaceChildren(...visible.map((session) => {
+    const row = document.createElement("tr");
+    for (const value of [when(session.created_at), session.messages, session.has_lead ? "Да" : "Нет"]) {
+      row.append(textElement("td", value));
+    }
+    row.append(textElement("td", session.reviewed ? "Да" : "Нет"));
+    const idCell = document.createElement("td");
+    const open = textElement("button", session.id, "session-open");
+    open.type = "button";
+    open.setAttribute("aria-label", `Открыть переписку сессии ${session.id}`);
+    open.addEventListener("click", () => show(session.id));
+    idCell.append(open);
+    row.append(idCell);
+    return row;
+  }));
+}
+
+async function show(id) {
+  const requestId = ++activeDetailRequest;
+  $("detail").querySelectorAll(".manager-report").forEach((report) => report.remove());
+  $("session-list-view").hidden = true;
+  const detail = $("detail");
+  const conversation = $("conversation");
+  $("history-disclosure").open = false;
+  $("detail-title").textContent = `Переписка — ${id}`;
+  detail.hidden = false;
+  $("detail-title").focus();
+  conversation.replaceChildren(textElement("p", "Загружаю переписку…"));
+  renderLead(null);
+  try {
+    const data = await get(`/api/admin/sessions/${encodeURIComponent(id)}`);
+    if (requestId !== activeDetailRequest) return;
+    conversation.replaceChildren(...(Array.isArray(data.messages) ? data.messages : []).map(renderMessage));
+    if (!conversation.childElementCount) conversation.append(textElement("p", "В этой сессии нет сообщений."));
+    renderLead(data.lead);
+    if (data.manager_report && data.manager_report.report) {
+      const report = document.createElement("section");
+      report.className = "lead-card manager-report";
+      report.dataset.sessionId = id;
+      report.append(textElement("h3", "Отчёт менеджера"), textElement("p", data.manager_report.report, "summary-text"));
+      $("detail").append(report);
+    }
+  } catch (error) {
+    if (requestId !== activeDetailRequest) return;
+    conversation.replaceChildren(textElement("p", error.message, "notice"));
+  }
+}
+
+function returnToList() {
+  activeDetailRequest += 1;
+  $("detail").hidden = true;
+  $("session-list-view").hidden = false;
+  $("session-search").focus();
+}
+
+$("history-disclosure").addEventListener("toggle", () => {
+  $("history-toggle").textContent = $("history-disclosure").open
+    ? "▲ Закрыть историю чата"
+    : "▼ Открыть историю чата";
+});
+
+$("filter-has-lead").addEventListener("change", renderSessions);
+$("filter-no-lead").addEventListener("change", renderSessions);
+$("session-search").addEventListener("input", renderSessions);
+$("review-yes").addEventListener("change", renderSessions);
+$("review-no").addEventListener("change", renderSessions);
+
+function setFilterOpen(open, suffix = "") {
+  const prefix = suffix ? "review-filter" : "filter";
+  const popup = $(`${prefix}-popup`);
+  const trigger = $(`${prefix}-trigger`);
+  if (open) {
+    popup.hidden = false;
+    const anchor = trigger.getBoundingClientRect();
+    const edge = 8;
+    const left = Math.max(edge, Math.min(anchor.left, window.innerWidth - popup.offsetWidth - edge));
+    let top = anchor.bottom + 6;
+    if (top + popup.offsetHeight > window.innerHeight - edge) top = anchor.top - popup.offsetHeight - 6;
+    popup.style.left = `${left}px`;
+    popup.style.top = `${Math.max(edge, top)}px`;
+  } else {
+    popup.hidden = true;
+  }
+  trigger.setAttribute("aria-expanded", String(open));
+}
+
+for (const suffix of ["", "-review"]) {
+  const popupId = suffix ? `review-filter-popup` : `filter-popup`;
+  const controlId = suffix ? `review-filter-control` : `filter-control`;
+  const triggerId = suffix ? `review-filter-trigger` : `filter-trigger`;
+  $(triggerId).addEventListener("click", () => {
+    const open = $(popupId).hidden;
+    setFilterOpen(false, suffix === "-review" ? "" : "-review");
+    setFilterOpen(open, suffix === "-review" ? "-review" : "");
+  });
+}
+function closeFilters() { setFilterOpen(false); setFilterOpen(false, "-review"); }
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Node) || !$("filter-control").contains(event.target)) setFilterOpen(false);
+  if (!(event.target instanceof Node) || !$("review-filter-control").contains(event.target)) setFilterOpen(false, "-review");
+});
+document.addEventListener("focusin", (event) => {
+  if (!$("filter-popup").hidden && !$("filter-control").contains(event.target)) setFilterOpen(false);
+  if (!$("review-filter-popup").hidden && !$("review-filter-control").contains(event.target)) setFilterOpen(false, "-review");
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { closeFilters(); }
+});
+document.addEventListener("scroll", closeFilters, true);
+window.addEventListener("resize", closeFilters);
+
+async function refreshSessions() {
+  if (sessionsLoading) return;
+  sessionsLoading = true;
+  $("auth-submit").disabled = true;
+  $("refresh-sessions").disabled = true;
   $("error").textContent = "";
   try {
     const sessions = await get("/api/admin/sessions");
-    $("rows").replaceChildren(...sessions.map((s) => {
-      const row = document.createElement("tr");
-      const button = document.createElement("button");
-      button.textContent = s.id;
-      button.addEventListener("click", () => show(s.id));
-      for (const value of [when(s.created_at), s.messages, s.has_lead ? "да" : "нет"]) {
-        const cell = document.createElement("td");
-        cell.textContent = value;
-        row.append(cell);
-      }
-      const cell = document.createElement("td");
-      cell.append(button);
-      row.append(cell);
-      return row;
-    }));
+    if (!Array.isArray(sessions)) throw new Error("Сервер вернул список сессий в неизвестном формате.");
+    loadedSessions = sessions;
+    renderSessions();
   } catch (error) {
     $("error").textContent = error.message;
+  } finally {
+    sessionsLoading = false;
+    $("auth-submit").disabled = false;
+    $("refresh-sessions").disabled = false;
   }
+}
+
+$("refresh-sessions").addEventListener("click", refreshSessions);
+$("detail-back").addEventListener("click", returnToList);
+$("auth").addEventListener("submit", (event) => {
+  event.preventDefault();
+  refreshSessions();
 });
 </script>
 </body>
