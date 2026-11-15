@@ -39,6 +39,10 @@ CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
 CREATE TABLE IF NOT EXISTS leads (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id), name TEXT NOT NULL, phone TEXT NOT NULL,
     company TEXT NOT NULL, consent_at REAL NOT NULL, summary TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS manager_leads (
+    session_id TEXT PRIMARY KEY REFERENCES leads(session_id), accepted_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS manager_reports (
+    session_id TEXT PRIMARY KEY REFERENCES manager_leads(session_id), report TEXT NOT NULL, closed_at REAL NOT NULL);
 """
 
 
@@ -96,10 +100,14 @@ def require_session(session_id):
 
 def load_history(session_id, limit=-1):
     rows = query(
-        "SELECT role, content FROM (SELECT * FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id",
+        "SELECT role, content FROM (SELECT * FROM messages WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT ?) ORDER BY id",
         session_id, limit,
     )
     return rows
+
+
+def load_summary_history(session_id):
+    return query("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id", session_id)
 
 
 def normalize_phone(raw):
@@ -125,6 +133,9 @@ def send_message(session_id: str, message: Message, x_debug_token: Annotated[str
         "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
         session_id, message.text, time.time(),
     )
+    active_manager = query("SELECT 1 FROM manager_leads a LEFT JOIN manager_reports r ON r.session_id=a.session_id WHERE a.session_id=? AND r.session_id IS NULL", session_id)
+    if active_manager:
+        return {"manager_active": True}
     try:
         result = pipeline.answer(state["index"], load_history(session_id, HISTORY_LIMIT))
     except Exception as exc:
@@ -152,12 +163,20 @@ def create_lead(session_id: str, lead: Lead):
     phone = normalize_phone(lead.phone)
     if query("SELECT 1 FROM leads WHERE session_id = ?", session_id):
         return {"status": "exists"}
-    try:
-        summary = pipeline.summarize(load_history(session_id))
-    except Exception as exc:
-        # Заявку нельзя терять из-за сбоя LLM: менеджер увидит диалог в истории.
-        print(f"Резюме не построено: {type(exc).__name__}", file=sys.stderr, flush=True)
-        summary = "Резюме не сформировано, см. историю диалога."
+    history = load_summary_history(session_id)
+    if not any(row["role"] in ("user", "assistant") for row in history):
+        summary = "Чат пустой."
+    else:
+        try:
+            summary = pipeline.summarize([
+                {"role": "user" if row["role"] == "user" else "assistant",
+                 "content": f"{'Клиент' if row['role'] == 'user' else 'Менеджер' if row['role'] == 'manager' else 'Бот'}: {row['content']}"}
+                for row in history
+            ])
+        except Exception as exc:
+            # Заявку нельзя терять из-за сбоя LLM: менеджер увидит диалог в истории.
+            print(f"Резюме не построено: {type(exc).__name__}", file=sys.stderr, flush=True)
+            summary = "Резюме не сформировано, см. историю диалога."
     now = time.time()
     query(
         "INSERT OR IGNORE INTO leads (session_id, name, phone, company, consent_at, summary, created_at) "
@@ -171,7 +190,8 @@ def create_lead(session_id: str, lead: Lead):
 def list_sessions(x_debug_token: Annotated[str | None, Header()] = None):
     require_debug_access(x_debug_token)
     return query(
-        "SELECT s.id, s.created_at, count(m.id) AS messages, l.session_id IS NOT NULL AS has_lead "
+        "SELECT s.id, s.created_at, count(m.id) AS messages, l.session_id IS NOT NULL AS has_lead, "
+        "EXISTS(SELECT 1 FROM manager_reports mr WHERE mr.session_id=s.id) AS reviewed "
         "FROM sessions s LEFT JOIN messages m ON m.session_id = s.id LEFT JOIN leads l ON l.session_id = s.id "
         "GROUP BY s.id ORDER BY s.created_at DESC LIMIT 500"
     )
@@ -182,10 +202,80 @@ def get_session(session_id: str, x_debug_token: Annotated[str | None, Header()] 
     require_debug_access(x_debug_token)
     require_session(session_id)
     leads = query("SELECT * FROM leads WHERE session_id = ?", session_id)
+    reports = query("SELECT report,closed_at FROM manager_reports WHERE session_id=?", session_id)
     return {
         "messages": query("SELECT role, content, meta, created_at FROM messages WHERE session_id = ? ORDER BY id", session_id),
         "lead": leads[0] if leads else None,
+        "manager_report": reports[0] if reports else None,
     }
+
+
+@app.get("/api/manager/queue")
+def manager_queue(x_debug_token: Annotated[str | None, Header()] = None):
+    require_debug_access(x_debug_token)
+    return query("SELECT l.* FROM leads l LEFT JOIN manager_leads m ON m.session_id=l.session_id WHERE m.session_id IS NULL ORDER BY l.created_at")
+
+
+@app.get("/api/manager/active")
+def manager_active(x_debug_token: Annotated[str | None, Header()] = None):
+    require_debug_access(x_debug_token)
+    return query("SELECT l.session_id,l.name,l.company,l.summary,l.created_at, m.content AS last_message,m.created_at AS last_message_at FROM manager_leads a JOIN leads l ON l.session_id=a.session_id LEFT JOIN manager_reports r ON r.session_id=a.session_id LEFT JOIN messages m ON m.id=(SELECT id FROM messages WHERE session_id=l.session_id ORDER BY id DESC LIMIT 1) WHERE r.session_id IS NULL ORDER BY COALESCE(m.created_at,l.created_at) DESC")
+
+
+@app.post("/api/manager/leads/{session_id}/accept")
+def manager_accept(session_id: str, x_debug_token: Annotated[str | None, Header()] = None):
+    require_debug_access(x_debug_token)
+    if not query("SELECT 1 FROM leads WHERE session_id=?", session_id):
+        raise HTTPException(404, "Заявка не найдена")
+    query("INSERT OR IGNORE INTO manager_leads(session_id,accepted_at) VALUES(?,?)", session_id, time.time())
+    if not query("SELECT 1 FROM messages WHERE session_id=? AND role='system' AND content='Менеджер подключился к чату'", session_id):
+        query("INSERT INTO messages(session_id,role,content,created_at) VALUES(?,'system','Менеджер подключился к чату',?)", session_id, time.time())
+    return {"status": "active"}
+
+
+class ManagerReport(BaseModel):
+    report: Annotated[str, Field(min_length=1, max_length=5000)]
+
+
+@app.post("/api/manager/sessions/{session_id}/close")
+def manager_close(session_id: str, body: ManagerReport, x_debug_token: Annotated[str | None, Header()] = None):
+    require_debug_access(x_debug_token)
+    if not query("SELECT 1 FROM manager_leads WHERE session_id=?", session_id):
+        raise HTTPException(404, "Активный чат не найден")
+    query("INSERT OR IGNORE INTO manager_reports(session_id,report,closed_at) VALUES(?,?,?)", session_id, body.report.strip(), time.time())
+    closure_notice = "Менеджер обработал вашу заявку"
+    if not query("SELECT 1 FROM messages WHERE session_id=? AND role='system' AND content=?", session_id, closure_notice):
+        query("INSERT INTO messages(session_id,role,content,created_at) VALUES(?,'system',?,?)", session_id, closure_notice, time.time())
+    return {"status": "closed"}
+
+
+@app.post("/api/manager/sessions/{session_id}/messages")
+def manager_send(session_id: str, message: Message, x_debug_token: Annotated[str | None, Header()] = None):
+    require_debug_access(x_debug_token)
+    require_session(session_id)
+    if not query("SELECT 1 FROM manager_leads WHERE session_id=?", session_id):
+        raise HTTPException(409, "Сначала примите заявку")
+    now = time.time()
+    query("INSERT INTO messages(session_id,role,content,created_at) VALUES(?,'manager',?,?)", session_id, message.text, now)
+    row = query("SELECT id FROM messages WHERE session_id=? AND role='manager' AND created_at=? ORDER BY id DESC LIMIT 1", session_id, now)[0]
+    return {"id": row["id"], "content": message.text, "created_at": now}
+
+
+@app.get("/api/manager/sessions/{session_id}")
+def manager_get_session(session_id: str, x_debug_token: Annotated[str | None, Header()] = None):
+    require_debug_access(x_debug_token)
+    require_session(session_id)
+    leads = query("SELECT * FROM leads WHERE session_id = ?", session_id)
+    return {
+        "messages": query("SELECT id, role, content, meta, created_at FROM messages WHERE session_id = ? ORDER BY id", session_id),
+        "lead": leads[0] if leads else None,
+    }
+
+
+@app.get("/api/sessions/{session_id}/manager-messages")
+def client_manager_messages(session_id: str, after_id: int = 0):
+    require_session(session_id)
+    return query("SELECT id,role,content,created_at FROM messages WHERE session_id=? AND role IN ('manager','system') AND id>? ORDER BY id", session_id, after_id)
 
 
 @app.get("/healthz")
@@ -201,3 +291,8 @@ def index_page():
 @app.get("/admin")
 def admin_page():
     return FileResponse(STATIC / "admin.html")
+
+
+@app.get("/manager")
+def manager_page():
+    return FileResponse(STATIC / "manager.html")
