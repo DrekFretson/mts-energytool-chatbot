@@ -12,13 +12,12 @@
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   #log { scrollbar-width: none; -ms-overflow-style: none; }
   #log::-webkit-scrollbar { display: none; }
-  .msg { position: relative; width: fit-content; padding: 9px 13px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; }
+  .msg { position: relative; overflow-wrap: anywhere; width: fit-content; padding: 9px 13px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; }
   .msg-time-spacer { display: inline-block; width: 32px; height: 0; }
   .msg-time { position: absolute; right: 13px; bottom: 7px; color: #5a626b; font-size: 11px; line-height: 1.2; white-space: nowrap; }
   .user { align-self: flex-end; background: #e30611; color: #fff; }
   .user .msg-time { color: #fff; }
   .assistant { align-self: flex-start; background: #eef0f3; }
-  .typing { color: #6b7380; font-style: italic; }
   .manager { align-self: flex-start; background: #fff1f1; border: 1px solid #e30611; }
   .system-event { align-self: center; color: #626b75; font-size: 13px; text-align: center; }
   .waiting { padding: 0; border-radius: 0; background: transparent; color: #4d5560; font-style: italic; }
@@ -42,6 +41,20 @@
   #suggestions button:hover { transform: translateY(-1px); }
   #suggestions button:focus-visible { outline: 2px solid #b0000d; outline-offset: 2px; }
   #suggestions button:active { background: #ffe8e9; transform: translateY(0); }
+  .links { display: flex; flex-wrap: wrap; gap: 8px; align-self: flex-start; max-width: 85%; margin-top: -4px; }
+  .links a { padding: 5px 12px; border: 1px solid #c6cbd2; border-radius: 16px; background: #fff; color: #97000a; font-size: 14px; text-decoration: none; }
+  .links a::after { content: " ↗"; }
+  .links a:hover, .links a:focus-visible { border-color: #b0000d; background: #fff4f4; }
+  .links a:focus-visible { outline: 2px solid #b0000d; outline-offset: 2px; }
+  #close-chat { display: none; min-width: 36px; font-size: 20px; line-height: 1; padding: 4px 10px; }
+  body.embed { background: #fff; }
+  body.embed main { max-width: none; }
+  body.embed header { padding: 8px 10px; gap: 6px; }
+  body.embed header h1 { font-size: 15px; }
+  body.embed header button { padding: 6px 8px; font-size: 13px; }
+  body.embed:not(.with-debug) .debug-toggle { display: none; }
+  body.embed #close-chat { display: inline-block; }
+  body.embed .send-action { flex-basis: 96px; width: 96px; }
   .debug { align-self: flex-start; font-size: 12.5px; color: #4d5560; border-left: 3px solid #c6cbd2; padding-left: 8px; white-space: pre-wrap; }
   form.send { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #e2e4e8; }
   form.send input { flex: 1; }
@@ -70,9 +83,10 @@
 <main>
   <header>
     <h1>Консультант EnergyTool</h1>
-    <label><input type="checkbox" id="debug"> Отладка</label>
+    <label class="debug-toggle"><input type="checkbox" id="debug"> Отладка</label>
     <button id="lead-open" type="button">Связаться с менеджером</button>
     <button id="reset" type="button">Новый диалог</button>
+    <button id="close-chat" type="button" aria-label="Свернуть чат">×</button>
   </header>
   <div id="log" aria-live="polite"></div>
   <form class="send" id="send">
@@ -117,28 +131,21 @@ const QUICK_PROMPTS = [
   "Нужны счётчики в СНТ",
   "Как найти хищения электроэнергии?",
 ];
-const TYPEWRITER_CHAR_DELAY_MS = 12;
 const ACTIVE_CHAT_STORAGE_KEY = "mts-energytool-active-chat-v1";
 let sessionId = null;
 let chatEntries = [];
 let activeRequestId = 0;
 let activeMessageController = null;
-let waitingDelayTimer = null;
-let waitingEndTimer = null;
 let waitingDotsTimer = null;
 let waitingMessage = null;
-let typewriterTimer = null;
-let typewriterMessage = null;
-let typewriterContent = null;
-let typewriterResolve = null;
-let typewriterEntry = null;
+let streamBubble = null;
 let managerPollTimer = null;
 let managerMessageIds = new Set();
 
 function persistActiveChat() {
   if (!sessionId) return;
   try {
-    localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({ sessionId, entries: chatEntries, managerMessageIds: [...managerMessageIds] }));
+    sessionStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({ sessionId, entries: chatEntries, managerMessageIds: [...managerMessageIds] }));
   } catch {
     // Storage can be disabled or full; the chat itself should continue working.
   }
@@ -146,14 +153,15 @@ function persistActiveChat() {
 
 function readActiveChat() {
   try {
-    const saved = JSON.parse(localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY) || "null");
+    const saved = JSON.parse(sessionStorage.getItem(ACTIVE_CHAT_STORAGE_KEY) || "null");
     if (!saved || typeof saved.sessionId !== "string" || !saved.sessionId || !Array.isArray(saved.entries)) return null;
     const entries = saved.entries.filter((entry) => entry &&
-      (entry.role === "user" || entry.role === "assistant" || entry.role === "manager") && typeof entry.text === "string")
+      ["user", "assistant", "manager", "system"].includes(entry.role) && typeof entry.text === "string")
       .map((entry) => ({
         role: entry.role,
         text: entry.text,
         createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+        links: safeLinks(entry.links),
       }));
     return { sessionId: saved.sessionId, entries, managerMessageIds: Array.isArray(saved.managerMessageIds) ? saved.managerMessageIds : [] };
   } catch {
@@ -162,71 +170,74 @@ function readActiveChat() {
 }
 
 function clearWaiting() {
-  clearTimeout(waitingDelayTimer);
-  clearTimeout(waitingEndTimer);
   clearInterval(waitingDotsTimer);
-  waitingDelayTimer = null;
-  waitingEndTimer = null;
   waitingDotsTimer = null;
   waitingMessage?.remove();
   waitingMessage = null;
 }
 
-function clearTypewriter(removeMessage = true) {
-  clearTimeout(typewriterTimer);
-  typewriterTimer = null;
-  if (removeMessage) typewriterMessage?.remove();
-  typewriterMessage = null;
-  typewriterContent = null;
-  if (typewriterEntry) {
-    const entryIndex = chatEntries.lastIndexOf(typewriterEntry);
-    if (entryIndex !== -1) {
-      chatEntries.splice(entryIndex, 1);
-      persistActiveChat();
-    }
-    typewriterEntry = null;
-  }
-  if (typewriterResolve) {
-    const resolve = typewriterResolve;
-    typewriterResolve = null;
-    resolve(false);
-  }
+function clearStream() {
+  streamBubble?.node.remove();
+  streamBubble = null;
 }
 
-function startWaiting(requestId) {
-  clearWaiting();
-  waitingMessage = document.createElement("div");
-  waitingMessage.className = "msg assistant waiting";
-  waitingMessage.setAttribute("role", "status");
-  waitingMessage.setAttribute("aria-live", "polite");
-  $("log").append(waitingMessage);
-  waitingMessage.scrollIntoView({ block: "nearest" });
+function cancelOnServer() {
+  // Сервер останавливает генерацию и убирает реплику без ответа из истории; сбой этого запроса клиенту не важен.
+  if (sessionId) fetch(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" }).catch(() => {});
+}
 
-  function animatePhrase(phrase) {
-    clearInterval(waitingDotsTimer);
-    let dot = 0;
-    const dots = [".", "..", "..."];
-    const update = () => {
-      if (!waitingMessage || requestId !== activeRequestId) return;
-      waitingMessage.textContent = `${phrase}${dots[dot]}`;
-      dot = (dot + 1) % dots.length;
-    };
-    update();
-    waitingDotsTimer = setInterval(update, 600);
+function showWaiting(phrase, requestId) {
+  if (!waitingMessage) {
+    waitingMessage = document.createElement("div");
+    waitingMessage.className = "msg assistant waiting";
+    waitingMessage.setAttribute("role", "status");
+    waitingMessage.setAttribute("aria-live", "polite");
+    $("log").append(waitingMessage);
+    waitingMessage.scrollIntoView({ block: "nearest" });
   }
+  clearInterval(waitingDotsTimer);
+  let dot = 0;
+  const dots = [".", "..", "..."];
+  const update = () => {
+    if (!waitingMessage || requestId !== activeRequestId) return;
+    waitingMessage.textContent = `${phrase}${dots[dot]}`;
+    dot = (dot + 1) % dots.length;
+  };
+  update();
+  waitingDotsTimer = setInterval(update, 600);
+}
 
-  animatePhrase("Ищу в материалах");
-  waitingDelayTimer = setTimeout(() => {
-    if (requestId !== activeRequestId || !waitingMessage) return;
-    animatePhrase("Обдумываю ответ");
-  }, 3000);
+function safeLinks(links) {
+  return (Array.isArray(links) ? links : []).filter((link) => link && typeof link.label === "string" &&
+    typeof link.url === "string" && link.url.startsWith("https://")).slice(0, 2);
+}
 
-  waitingEndTimer = setTimeout(() => {
-    if (requestId !== activeRequestId || !waitingMessage) return;
-    clearInterval(waitingDotsTimer);
-    waitingDotsTimer = null;
-    waitingMessage.textContent = "Ещё немного…";
-  }, 15000);
+function addLinks(links) {
+  const shown = safeLinks(links);
+  if (!shown.length) return;
+  const row = document.createElement("div");
+  row.className = "links";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", "Страницы сайта по теме ответа");
+  shown.forEach((link) => {
+    const anchor = document.createElement("a");
+    anchor.href = link.url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.textContent = link.label;
+    anchor.setAttribute("aria-label", `${link.label} (откроется в новой вкладке)`);
+    row.append(anchor);
+  });
+  $("log").append(row);
+  row.scrollIntoView({ block: "nearest" });
+}
+
+function addSystemEvent(text) {
+  const event = document.createElement("div");
+  event.className = "system-event";
+  event.textContent = `— ${text} —`;
+  $("log").append(event);
+  event.scrollIntoView({ block: "nearest" });
 }
 
 function appendMessageTime(node, timestamp) {
@@ -253,7 +264,7 @@ function startManagerPolling() {
         if (managerMessageIds.has(message.id)) continue;
         managerMessageIds.add(message.id);
         if (message.role === "system") {
-          const event = document.createElement("div"); event.className = "system-event"; event.textContent = `— ${message.content} —`; $("log").append(event);
+          addSystemEvent(message.content);
         } else add("manager", message.content, false, message.created_at * 1000);
         const entry = { role: message.role, text: message.content, createdAt: message.created_at * 1000, serverId: message.id };
         chatEntries.push(entry);
@@ -283,7 +294,7 @@ window.addEventListener("resize", () => {
   });
 });
 
-function add(role, text, persist = true, createdAt = Date.now()) {
+function add(role, text, persist = true, createdAt = Date.now(), links = []) {
   const node = document.createElement("div");
   node.className = "msg " + role;
   const content = document.createElement("span");
@@ -295,90 +306,58 @@ function add(role, text, persist = true, createdAt = Date.now()) {
   fitMessageBubble(node, content);
   node.scrollIntoView();
   if (persist && (role === "user" || role === "assistant")) {
-    chatEntries.push({ role, text: String(text), createdAt });
+    chatEntries.push({ role, text: String(text), createdAt, links: safeLinks(links) });
     persistActiveChat();
   }
+  addLinks(links);
 }
 
-function addProgressively(text, requestId) {
-  clearTypewriter();
-  const node = document.createElement("div");
-  node.className = "msg assistant";
-  node.setAttribute("aria-live", "off");
-  const content = document.createElement("span");
-  content.className = "msg-content";
-  node.append(content);
-  $("log").append(node);
-  typewriterMessage = node;
-  typewriterContent = content;
-  const fullText = String(text ?? "");
-  const characters = Array.from(fullText);
-  const createdAt = Date.now();
-  typewriterEntry = { role: "assistant", text: fullText, createdAt };
-  chatEntries.push(typewriterEntry);
-  persistActiveChat();
-  appendMessageTime(node, createdAt);
-  content.textContent = fullText;
-  fitMessageBubble(node, content);
-  content.textContent = "";
+function appendToStream(piece) {
+  if (!streamBubble) {
+    const node = document.createElement("div");
+    node.className = "msg assistant";
+    // Читалка экрана получает ответ целиком в конце, а не по куску.
+    node.setAttribute("aria-live", "off");
+    const content = document.createElement("span");
+    content.className = "msg-content";
+    node.append(content);
+    $("log").append(node);
+    streamBubble = { node, content };
+  }
+  streamBubble.content.textContent += piece;
+  streamBubble.node.scrollIntoView({ block: "nearest" });
+}
 
-  return new Promise((resolve) => {
-    typewriterResolve = resolve;
-    let index = 0;
-    const revealNext = () => {
-      if (requestId !== activeRequestId) {
-        clearTypewriter();
-        return;
-      }
-      if (index >= characters.length) {
-        node.setAttribute("aria-live", "polite");
-        typewriterMessage = null;
-        typewriterContent = null;
-        typewriterEntry = null;
-        typewriterTimer = null;
-        typewriterResolve = null;
-        resolve(true);
-        return;
-      }
-
-      typewriterContent.textContent += characters[index];
-      index += 1;
-      if (index === 1 || index % 8 === 0 || index === characters.length) {
-        node.scrollIntoView({ block: "nearest" });
-      }
-      if (index === characters.length) {
-        node.setAttribute("aria-live", "polite");
-        typewriterMessage = null;
-        typewriterContent = null;
-        typewriterEntry = null;
-        typewriterTimer = null;
-        typewriterResolve = null;
-        resolve(true);
-        return;
-      }
-      typewriterTimer = setTimeout(revealNext, TYPEWRITER_CHAR_DELAY_MS);
-    };
-    revealNext();
-  });
+function finishStream(text, links) {
+  // Показанные куски заменяются готовым сообщением: читалка экрана объявляет ответ один раз и целиком.
+  clearStream();
+  add("assistant", text, true, Date.now(), links);
 }
 
 function addDebug(debug) {
   const node = document.createElement("div");
   node.className = "debug";
-  // Широкий контекст тянет документы целиком: по разделу на строку это сотня строк, поэтому сводка по документам.
-  const files = new Map();
-  for (const s of debug.sources || []) {
-    const f = files.get(s.file) || { sections: 0, score: null };
-    f.sections += 1;
-    if (s.score != null && (f.score == null || s.score > f.score)) f.score = s.score;
-    files.set(s.file, f);
-  }
-  const sources = [...files].map(([file, f]) => `${f.score ?? "—"}  ${file}: разделов ${f.sections}`).join("\n");
-  const t = debug.timings || {};
-  const time = `Время: всего ${t.total_ms} мс (поиск ${t.search_ms}, модель ${t.llm_ms})`;
+  const timings = debug.timings || {};
+  const seconds = (ms) => `${(ms / 1000).toFixed(1)} с`;
+  const parts = [["поиск", timings.search_ms], ["модель", timings.llm_ms], ["до первого слова", timings.first_token_ms]]
+    .filter(([, ms]) => Number.isFinite(ms)).map(([name, ms]) => `${name} ${seconds(ms)}`);
+  const lines = [Number.isFinite(timings.total_ms) ? `Время ответа: ${seconds(timings.total_ms)} (${parts.join(", ")})` : "Время ответа: нет данных"];
+  const documents = new Map();
+  (debug.sources || []).forEach((source) => {
+    const entry = documents.get(source.file) || { title: String(source.crumb).split(" > ")[0], sections: 0 };
+    entry.sections += 1;
+    documents.set(source.file, entry);
+  });
+  const shown = [...documents].slice(0, 8);
+  lines.push(`Документы базы знаний в ответе: ${documents.size}`);
+  shown.forEach(([file, entry], index) => lines.push(`${index + 1}. ${entry.title} (${file}), разделов: ${entry.sections}`));
+  if (documents.size > shown.length) lines.push(`и ещё ${documents.size - shown.length}`);
+  if (debug.route && debug.route !== "off") lines.push(`Маршрут реплики: ${debug.route}`);
+  if ((debug.links || []).length) lines.push(`Ссылки на сайт: ${debug.links.map((link) => link.label).join(", ")}`);
   const unverified = (debug.unverified_numbers || []).join(", ");
-  node.textContent = `${time}\nДокументы базы (${files.size}), оценка поиска:\n${sources}` +
-    (unverified ? `\nЧисла не из базы: ${unverified}` : "") + (debug.degraded ? "\nОтвет-заглушка: сбой LLM" : "");
+  if (unverified) lines.push(`Числа не из базы: ${unverified}`);
+  if (debug.degraded) lines.push("Ответ-заглушка: сбой LLM");
+  node.textContent = lines.join("\n");
   $("log").append(node);
   node.scrollIntoView();
 }
@@ -418,14 +397,53 @@ async function api(path, body, headers = {}, signal) {
   return data;
 }
 
+async function streamMessage(path, body, headers, signal, onEvent) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const error = new Error(typeof data.detail === "string" ? data.detail : "Проверьте введённые данные");
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let done = null;
+  for (;;) {
+    const chunk = await reader.read();
+    buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop();
+    for (const block of blocks) {
+      const event = /^event: (.+)$/m.exec(block);
+      const data = /^data: (.+)$/m.exec(block);
+      if (!event || !data) continue;
+      const payload = JSON.parse(data[1]);
+      if (event[1] === "done") done = payload;
+      else onEvent(event[1], payload);
+    }
+    if (chunk.done) break;
+  }
+  if (!done) throw new Error("Поток ответа оборвался");
+  return done;
+}
+
 async function newDialog(restoreLast = false) {
   clearInterval(managerPollTimer);
   managerPollTimer = null;
   const dialogRequestId = ++activeRequestId;
-  activeMessageController?.abort();
+  if (activeMessageController) {
+    activeMessageController.abort();
+    cancelOnServer();
+  }
   activeMessageController = null;
   clearWaiting();
-  clearTypewriter();
+  clearStream();
   $("cancel").hidden = true;
   $("cancel").disabled = false;
   $("submit").hidden = false;
@@ -441,8 +459,8 @@ async function newDialog(restoreLast = false) {
       managerMessageIds = new Set(saved.managerMessageIds);
       chatEntries.forEach((entry) => {
         if (entry.role === "system") {
-          const event = document.createElement("div"); event.className = "system-event"; event.textContent = `— ${entry.text} —`; $("log").append(event);
-        } else add(entry.role, entry.text, false, entry.createdAt);
+          addSystemEvent(entry.text);
+        } else add(entry.role, entry.text, false, entry.createdAt, entry.links);
       });
       if (!chatEntries.some((entry) => entry.role === "user")) showWelcome();
       persistActiveChat();
@@ -483,23 +501,30 @@ $("send").addEventListener("submit", async (event) => {
   const controller = new AbortController();
   activeMessageController = controller;
   clearWaiting();
-  clearTypewriter();
+  clearStream();
   $("suggestions")?.remove();
   $("text").value = "";
   $("submit").hidden = true;
   $("cancel").hidden = false;
-  $("cancel").disabled = false;
   add("user", text);
-  startWaiting(requestId);
+  showWaiting("Ищу в материалах", requestId);
   try {
     const headers = $("debug").checked ? { "X-Debug-Token": sessionStorage.debugToken } : {};
-    const reply = await api(`/api/sessions/${sessionId}/messages`, { text }, headers, controller.signal);
+    const reply = await streamMessage(`/api/sessions/${sessionId}/messages/stream`, { text }, headers, controller.signal, (kind, data) => {
+      if (requestId !== activeRequestId) return;
+      if (kind === "status") showWaiting(data.stage === "thinking" ? "Обдумываю ответ" : "Готовлю ответ", requestId);
+      if (kind === "delta") {
+        clearWaiting();
+        appendToStream(data.text);
+      }
+    });
     if (requestId !== activeRequestId) return;
     clearWaiting();
-    if (reply.manager_active) return;
-    $("cancel").disabled = true;
-    await addProgressively(reply.text, requestId);
-    if (requestId !== activeRequestId) return;
+    if (reply.manager_active) {
+      addSystemEvent("Сообщение передано менеджеру");
+      return;
+    }
+    finishStream(reply.text, reply.links);
     if (reply.debug) addDebug(reply.debug);
     if (reply.debug_error) debugFailed(reply.debug_error);
     if (reply.open_form) $("lead-open").click();
@@ -507,8 +532,14 @@ $("send").addEventListener("submit", async (event) => {
   } catch (error) {
     if (requestId === activeRequestId && error.name !== "AbortError") {
       clearWaiting();
-      clearTypewriter();
-      add("assistant", error.status === 429 || error.status === 413 ? error.message : "Не получилось ответить. Попробуйте ещё раз.");
+      clearStream();
+      if (error.status === 404) {
+        // Сервер не знает сохранённый диалог (например, базу очистили): начинаем новый, а не отвечаем ошибкой на каждую реплику.
+        await newDialog(false);
+        add("assistant", "Прошлый диалог больше недоступен, я начал новый. Повторите, пожалуйста, вопрос.", false);
+        return;
+      }
+      add("assistant", error.status === 429 || error.status === 413 ? error.message : "Не получилось ответить. Попробуйте ещё раз.", false);
     }
   } finally {
     if (requestId === activeRequestId) {
@@ -517,26 +548,39 @@ $("send").addEventListener("submit", async (event) => {
       $("submit").hidden = false;
       $("submit").disabled = false;
       $("cancel").hidden = true;
-      $("cancel").disabled = false;
       $("text").focus();
     }
   }
 });
 
 $("cancel").addEventListener("click", () => {
-  if (!activeMessageController || $("cancel").disabled) return;
+  if (!activeMessageController) return;
   activeRequestId += 1;
   const controller = activeMessageController;
   activeMessageController = null;
   controller.abort();
+  cancelOnServer();
   clearWaiting();
-  clearTypewriter();
+  clearStream();
   $("submit").hidden = false;
   $("submit").disabled = false;
   $("cancel").hidden = true;
-  $("cancel").disabled = false;
   $("text").focus();
 });
+
+// Режим виджета: страница открыта во фрейме на сайте, кнопка и Esc сворачивают панель у родителя.
+if (new URLSearchParams(location.search).has("embed")) {
+  document.body.classList.add("embed");
+  if (new URLSearchParams(location.search).has("debug")) document.body.classList.add("with-debug");
+  const closeChat = () => parent.postMessage({ type: "energytool-chat-close" }, "*");
+  $("close-chat").addEventListener("click", closeChat);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("lead").open) closeChat();
+  });
+  window.addEventListener("message", (event) => {
+    if (event.source === parent && event.data?.type === "energytool-chat-open") $("text").focus();
+  });
+}
 
 $("reset").addEventListener("click", () => newDialog(false));
 const LEAD_FIELDS = [

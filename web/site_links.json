@@ -1,0 +1,22 @@
+{
+  "products": {
+    "orem": {"url": "https://energytool.mts.ru/orem", "label": "Выход на оптовый рынок", "about": "выход предприятия на оптовый рынок электроэнергии, порог мощности, экономия на покупке электроэнергии"},
+    "askue": {"url": "https://energytool.mts.ru/askue", "label": "Облачная платформа учёта", "about": "платформа учёта электроэнергии и других ресурсов, умные счётчики, сбор показаний с объектов"},
+    "solar": {"url": "https://energytool.mts.ru/solar-panels", "label": "Солнечные электростанции", "about": "солнечные панели и станции для бизнеса: сетевые, гибридные, автономные"},
+    "losses": {"url": "https://energytool.mts.ru/commercial_losses", "label": "Поиск коммерческих потерь", "about": "поиск хищений и коммерческих потерь электроэнергии для сетевых и сбытовых компаний"},
+    "readings": {"url": "https://energytool.mts.ru/metering-devices", "label": "Распознавание показаний", "about": "распознавание показаний приборов учёта по фотографии"},
+    "overview": {"url": "https://energytool.mts.ru/", "label": "Все решения EnergyTool", "about": "общий вопрос о том, чем занимается МТС EnergyTool и какие есть решения, когда продукт ещё не выбран"}
+  },
+  "extra": {
+    "askue_price": {"url": "https://energytool.mts.ru/askue/price", "label": "Стоимость внедрения учёта", "when": "вопрос о цене платформы учёта или счётчиков"},
+    "askue_case": {"url": "https://business.mts.ru/moskva/mts_energytool", "label": "Пример внедрения учёта", "when": "клиент просит пример внедрения платформы учёта"},
+    "snt": {"url": "https://energytool.mts.ru/askue/snt", "label": "Учёт в СНТ", "when": "клиент - СНТ или садовое товарищество"},
+    "equipment": {"url": "https://energytool.mts.ru/askue/equipment", "label": "Поддерживаемое оборудование", "when": "вопрос о совместимости счётчиков и каналов связи с платформой учёта"},
+    "shop": {"url": "https://energytool.mts.ru/shop", "label": "Магазин приборов учёта", "when": "клиент хочет купить счётчик"},
+    "tariffs": {"url": "https://energytool.mts.ru/askue/tarify-1-oktyabrya-2026", "label": "Рост тарифов и как снизить расходы", "when": "вопрос о росте тарифов или счёта за электроэнергию"},
+    "orem_saving": {"url": "https://energytool.mts.ru/orem/orem-start-saving", "label": "Экономия на оптовом рынке", "when": "вопрос о размере экономии на оптовом рынке"},
+    "small_points": {"url": "https://energytool.mts.ru/orem/malyye_tochki", "label": "Интервальный учёт малых точек", "when": "вопрос про малые точки поставки на оптовом рынке"},
+    "solar_payback": {"url": "https://energytool.mts.ru/solar-panels/solar-benefit", "label": "Выгодны ли солнечные панели", "when": "вопрос об окупаемости солнечной станции"},
+    "microgeneration": {"url": "https://energytool.mts.ru/solar-panels/meter-for-a-solar-panel-owner", "label": "Счётчик для микрогенерации", "when": "вопрос о микрогенерации и продаже излишков в сеть"}
+  }
+}

@@ -145,7 +145,7 @@ function textElement(tag, text, className) {
 }
 
 function formatSummary(text) {
-  return String(text ?? "").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm, "$1: ");
+  return String(text ?? "").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Что консультант рекомендовал \(продукты EnergyTool и почему\)|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm, "$1: ");
 }
 
 function parseMeta(raw) {
@@ -220,7 +220,7 @@ function renderMessage(message) {
   article.className = "message";
   const header = document.createElement("div");
   header.className = "message-head";
-  header.append(textElement("strong", message.role === "user" ? "Клиент" : message.role === "manager" ? "Менеджер" : "Консультант"));
+  header.append(textElement("strong", ({ user: "Клиент", manager: "Менеджер", system: "Система" })[message.role] || "Консультант"));
   const timestamp = when(message.created_at);
   if (timestamp) header.append(textElement("time", timestamp));
   article.append(header, textElement("p", message.content, "message-body"));
