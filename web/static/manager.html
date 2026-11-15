@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ru">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<title>Рабочее окно менеджера — МТС EnergyTool</title>
+		<style>
+			*{box-sizing:border-box}
+			body{margin:0;font:15px/1.45 system-ui,sans-serif;color:#202329;background:#f4f5f7}
+			button,input,textarea{font:inherit}
+			button{cursor:pointer;border:1px solid #c6cbd2;border-radius:8px;background:white;padding:9px 12px;min-height:40px}
+			button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #a3000b;outline-offset:2px}
+			.primary{background:#e30611;color:white;border-color:#e30611}
+			.shell{height:100dvh;display:grid;grid-template-columns:480px 1fr;gap:12px;padding:12px;transition:grid-template-columns .25s ease}
+			.shell.collapsed{grid-template-columns:0 1fr}
+			.side{min-width:0;overflow:hidden;display:flex;flex-direction:column;background:white;border:1px solid #d9dde2;border-radius:12px}
+			.side-head{display:flex;gap:8px;padding:10px}
+			.side-head #queue{flex:1}
+			#list-title{margin-left:32px}
+			.side-head #collapse{flex:0 0 40px;width:40px;height:40px;padding:0;display:grid;place-items:center}
+			.list{overflow:auto;padding:8px;scrollbar-width:none;-ms-overflow-style:none}
+			.list::-webkit-scrollbar{display:none}
+			.card{width:100%;display:block;text-align:left;margin-bottom:8px;padding:12px;background:#fff;border:1px solid #e0e3e7}
+			.card.selected{background:#eef0f3}
+			.card strong,.card small{display:block;overflow-wrap:anywhere}
+			.preview{color:#505761;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+			.lead-details{padding:4px 12px}
+			.lead-details p{margin:5px 0;overflow-wrap:anywhere}
+			.lead-details h3{margin:14px 0 5px;font-size:16px}
+			.lead-summary{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+			.stamp{text-align:right;color:#626b75;font-size:12px}
+			.main{min-width:0;min-height:0;display:flex;flex-direction:column;background:white;border:1px solid #d9dde2;border-radius:12px;padding:14px}
+			.main-head{flex:0 0 auto;display:flex;align-items:center;gap:8px}
+			.main-head h1{font-size:18px;flex:1}
+			.log{flex:1 1 0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:none;-ms-overflow-style:none;display:flex;flex-direction:column;gap:10px;padding:12px}
+			.log::-webkit-scrollbar{display:none}
+			.msg{max-width:85%;padding:9px 12px;border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+			.client{align-self:flex-start;background:#fff;color:#202329;border:1px solid #e0e3e7}
+			.assistant,.manager{align-self:flex-end;background:#e30611;color:white;border:1px solid #e30611}
+			.system-event{align-self:center;max-width:100%;color:#626b75;text-align:center;font-size:13px}
+			.compose{display:flex;gap:8px}
+			.compose textarea{flex:1;resize:vertical;min-height:44px;max-height:140px;padding:9px;border:1px solid #c6cbd2;border-radius:8px}
+			.notice{padding:8px;color:#8d0010}
+			.auth{max-width:420px;margin:12vh auto;padding:24px;background:white;border-radius:12px}
+			.auth input{display:block;width:100%;padding:10px;margin:10px 0}
+			.hidden{display:none!important}
+			#restore{display:none}
+			#report-dialog{width:min(440px,calc(100vw - 32px));padding:20px;border:1px solid #d9dde2;border-radius:12px;box-shadow:0 16px 48px #0003}
+			#report-dialog::backdrop{background:#16191f66}
+			#report-form{display:grid;gap:12px}
+			#report-form h2{margin:0;font-size:19px}
+			#report-text{width:100%;min-height:120px;resize:vertical;padding:10px;border:1px solid #c6cbd2;border-radius:8px}
+			.dialog-actions{display:flex;justify-content:flex-end;gap:8px}
+			@media(max-width:700px){.shell{grid-template-columns:1fr;padding:6px}
+				.side{position:fixed;z-index:3;inset:6px auto 6px 6px;width:min(480px,85vw);box-shadow:0 0 0 100vmax #0005;transition:transform .25s ease}
+				.shell.collapsed .side{transform:translateX(-110%);visibility:hidden}
+				.main{padding:8px}
+				.msg{max-width:94%}
+			}
+			@media(prefers-reduced-motion:reduce){.shell,.side{transition:none}
+			}
+			</style>
+	</head>
+	<body>
+		<form id="auth" class="auth">
+			<h1>Вход менеджера</h1>
+			<label for="token">Токен отладки</label>
+			<input id="token" type="password" autocomplete="current-password" required>
+			<button class="primary">Войти</button>
+			<p id="error" role="alert">
+			</p>
+		</form>
+		<div id="app" class="shell hidden">
+			<aside class="side">
+				<div class="side-head">
+					<button id="queue">Новые заявки</button>
+					<button id="collapse" aria-label="Свернуть список чатов">◀</button>
+				</div>
+				<h2 id="list-title">Активные чаты</h2>
+				<div id="list" class="list">
+				</div>
+			</aside>
+			<main class="main">
+				<div class="main-head">
+					<button id="expand" aria-label="Показать список чатов" class="hidden">☰</button>
+					<h1 id="title">Выберите чат</h1>
+					<button id="logout">Выйти</button>
+				</div>
+				<div id="log" class="log" aria-live="polite">
+				</div>
+				<form id="compose" class="compose hidden">
+					<textarea id="text" aria-label="Сообщение клиенту" required maxlength="2000"></textarea>
+					<button class="primary">Отправить</button>
+					<button id="close-case" type="button">Закрыть заявку</button>
+				</form>
+				<p id="notice" class="notice" role="status">
+				</p>
+			</main>
+		</div>
+		<dialog id="report-dialog">
+			<form id="report-form">
+				<h2>Резюме по заявке</h2>
+				<label for="report-text">Отчёт менеджера</label>
+				<textarea id="report-text" required maxlength="5000"></textarea>
+				<div class="dialog-actions">
+					<button type="button" id="report-cancel">Отмена</button>
+					<button class="primary" type="submit">Закрыть заявку</button>
+				</div>
+			</form>
+		</dialog>
+		<script>
+
+			const $=id=>document.getElementById(id);let token="",current=null,queueMode=false,collapsed=false,chatRefreshBusy=false;
+
+			async function request(path,method="GET",body){const r=await fetch(path,{method,headers:{"X-Debug-Token":token,...(body?{"Content-Type":"application/json"}:{})},body:body?JSON.stringify(body):undefined});if(!r.ok)throw Error((await r.json().catch(()=>({}))).detail||"Ошибка запроса");return r.json()}
+
+			function time(v){return v?new Date(Number(v)*1000).toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}):""}
+
+			function item(tag,text,cls){const e=document.createElement(tag);e.textContent=text??"";if(cls)e.className=cls;return e}
+
+			function formatSummary(text){return String(text??"").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm,"$1: ")}
+
+			async function loadList(){try{const rows=await request(queueMode?"/api/manager/queue":"/api/manager/active");$("list").replaceChildren();$("list-title").textContent=`${queueMode?"Новые заявки":"Активные чаты"} (${rows.length})`;$("queue").textContent=queueMode?"Активные чаты":"Новые заявки";for(const x of rows){const b=item("button","","card"+(x.session_id===current?" selected":""));b.type="button";let preview=x.content||x.last_message||x.summary||"";if(preview.length>43)preview=preview.slice(0,40)+"...";b.append(item("strong",x.name||x.session_id),item("span",preview,"preview"),item("small",time(x.last_message_at||x.created_at),"stamp"));b.onclick=()=>queueMode?showLead(x):selectChat(x.session_id);$("list").append(b)}}catch(e){$("notice").textContent=e.message}}
+
+			async function showLead(x){
+				$("title").textContent=x.name||x.session_id;
+				const details=item("section","","lead-details");
+				for(const [label,value] of [["Компания",x.company],["Телефон",x.phone]]){
+					const p=document.createElement("p");
+					p.append(item("strong",`${label}: `),document.createTextNode(value||"Не указано"));
+					details.append(p);
+				}
+				details.append(item("h3","Резюме"),item("p",formatSummary(x.summary||"Чат пустой."),"lead-summary"));
+				$("log").replaceChildren(details);
+				const b=item("button","Принять","primary");
+				b.onclick=async()=>{try{await request(`/api/manager/leads/${x.session_id}/accept`,"POST",{});queueMode=false;await loadList();await selectChat(x.session_id)}catch(e){$("notice").textContent=e.message}};
+
+				$("log").append(b);
+			}
+
+			function renderChatMessage(m){const e=item("div",m.role==="system"?`— ${m.content} —`:`${m.role==="user"?"Клиент":m.role==="manager"?"Менеджер":"Консультант"}: ${m.content}`,`msg ${m.role==="user"?"client":m.role==="system"?"system-event":m.role==="manager"?"manager":"assistant"}`);e.dataset.messageId=String(m.id);return e}
+
+			async function refreshOpenChat(){if(!token||!current||chatRefreshBusy)return;chatRefreshBusy=true;const id=current;try{const d=await request(`/api/manager/sessions/${encodeURIComponent(id)}`);if(current!==id)return;const known=new Set([...$("log").querySelectorAll("[data-message-id]")].map(e=>e.dataset.messageId));const added=d.messages.filter(m=>!known.has(String(m.id)));if(added.length){const nearBottom=$("log").scrollHeight-$("log").scrollTop-$("log").clientHeight<80;for(const m of added)$("log").append(renderChatMessage(m));if(nearBottom)$("log").scrollTop=$("log").scrollHeight;loadList()}}catch{}finally{chatRefreshBusy=false}}
+
+			async function selectChat(id){current=id;$("notice").textContent="";try{const d=await request(`/api/manager/sessions/${id}`);$("title").textContent=d.lead?.name||id;$("log").replaceChildren();for(const m of d.messages)$("log").append(renderChatMessage(m));$("compose").classList.remove("hidden");$("log").scrollTop=$("log").scrollHeight;$("close-case").onclick=()=>{$("report-text").value="";$("report-dialog").showModal();$("report-text").focus()};
+					loadList()}catch(e){$("notice").textContent=e.message}}
+			$("auth").onsubmit=async e=>{e.preventDefault();token=$("token").value;try{await request("/api/manager/active");$("auth").classList.add("hidden");$("app").classList.remove("hidden");await loadList()}catch(err){token="";$("error").textContent=err.message}};
+
+			$("queue").onclick=()=>{queueMode=!queueMode;loadList()};
+			$("collapse").onclick=()=>{$("app").classList.add("collapsed");$("expand").classList.remove("hidden")};
+			$("expand").onclick=()=>{$("app").classList.remove("collapsed");$("expand").classList.add("hidden")};
+			$("logout").onclick=()=>{token="";current=null;$("app").classList.add("hidden");$("auth").classList.remove("hidden");$("token").value=""};
+			$("text").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();$("compose").requestSubmit()}});$("report-cancel").onclick=()=>$("report-dialog").close();$("report-form").onsubmit=async e=>{e.preventDefault();if(!current)return;try{await request(`/api/manager/sessions/${current}/close`,"POST",{report:$("report-text").value});$("report-dialog").close();$("compose").classList.add("hidden");$("notice").textContent="Заявка закрыта";await loadList()}catch(err){$("notice").textContent=err.message}};
+			$("compose").onsubmit=async e=>{e.preventDefault();if(!current)return;try{await request(`/api/manager/sessions/${current}/messages`,"POST",{text:$("text").value});$("text").value="";await selectChat(current);$("log").scrollTop=$("log").scrollHeight}catch(err){$("notice").textContent=err.message}};
+
+
+			setInterval(()=>{if(token){loadList();if(!queueMode)refreshOpenChat()}},1500);
+			</script>
+	</body>
+</html>

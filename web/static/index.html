@@ -12,9 +12,14 @@
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   #log { scrollbar-width: none; -ms-overflow-style: none; }
   #log::-webkit-scrollbar { display: none; }
-  .msg { padding: 9px 13px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; }
+  .msg { position: relative; width: fit-content; padding: 9px 13px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; }
+  .msg-time-spacer { display: inline-block; width: 32px; height: 0; }
+  .msg-time { position: absolute; right: 13px; bottom: 7px; color: #5a626b; font-size: 11px; line-height: 1.2; white-space: nowrap; }
   .user { align-self: flex-end; background: #e30611; color: #fff; }
+  .user .msg-time { color: #fff; }
   .assistant { align-self: flex-start; background: #eef0f3; }
+  .manager { align-self: flex-start; background: #fff1f1; border: 1px solid #e30611; }
+  .system-event { align-self: center; color: #626b75; font-size: 13px; text-align: center; }
   .waiting { padding: 0; border-radius: 0; background: transparent; color: #4d5560; font-style: italic; }
   #suggestions { display: flex; flex-wrap: wrap; gap: 8px; align-self: flex-start; max-width: 100%; }
   #suggestions button {
@@ -123,13 +128,16 @@ let waitingDotsTimer = null;
 let waitingMessage = null;
 let typewriterTimer = null;
 let typewriterMessage = null;
+let typewriterContent = null;
 let typewriterResolve = null;
 let typewriterEntry = null;
+let managerPollTimer = null;
+let managerMessageIds = new Set();
 
 function persistActiveChat() {
   if (!sessionId) return;
   try {
-    localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({ sessionId, entries: chatEntries }));
+    localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, JSON.stringify({ sessionId, entries: chatEntries, managerMessageIds: [...managerMessageIds] }));
   } catch {
     // Storage can be disabled or full; the chat itself should continue working.
   }
@@ -140,8 +148,13 @@ function readActiveChat() {
     const saved = JSON.parse(localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY) || "null");
     if (!saved || typeof saved.sessionId !== "string" || !saved.sessionId || !Array.isArray(saved.entries)) return null;
     const entries = saved.entries.filter((entry) => entry &&
-      (entry.role === "user" || entry.role === "assistant") && typeof entry.text === "string");
-    return { sessionId: saved.sessionId, entries };
+      (entry.role === "user" || entry.role === "assistant" || entry.role === "manager") && typeof entry.text === "string")
+      .map((entry) => ({
+        role: entry.role,
+        text: entry.text,
+        createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+      }));
+    return { sessionId: saved.sessionId, entries, managerMessageIds: Array.isArray(saved.managerMessageIds) ? saved.managerMessageIds : [] };
   } catch {
     return null;
   }
@@ -163,6 +176,7 @@ function clearTypewriter(removeMessage = true) {
   typewriterTimer = null;
   if (removeMessage) typewriterMessage?.remove();
   typewriterMessage = null;
+  typewriterContent = null;
   if (typewriterEntry) {
     const entryIndex = chatEntries.lastIndexOf(typewriterEntry);
     if (entryIndex !== -1) {
@@ -214,14 +228,73 @@ function startWaiting(requestId) {
   }, 15000);
 }
 
-function add(role, text, persist = true) {
+function appendMessageTime(node, timestamp) {
+  const date = new Date(timestamp);
+  const spacer = document.createElement("span");
+  spacer.className = "msg-time-spacer";
+  spacer.setAttribute("aria-hidden", "true");
+  const time = document.createElement("time");
+  time.className = "msg-time";
+  time.dateTime = date.toISOString();
+  time.textContent = date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  node.append(spacer, time);
+}
+
+function startManagerPolling() {
+  clearInterval(managerPollTimer);
+  const poll = async () => {
+    if (!sessionId || document.hidden) return;
+    const requestedSession = sessionId;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSession)}/manager-messages`);
+      if (!response.ok || requestedSession !== sessionId) return;
+      for (const message of await response.json()) {
+        if (managerMessageIds.has(message.id)) continue;
+        managerMessageIds.add(message.id);
+        if (message.role === "system") {
+          const event = document.createElement("div"); event.className = "system-event"; event.textContent = `— ${message.content} —`; $("log").append(event);
+        } else add("manager", message.content, false, message.created_at * 1000);
+        const entry = { role: message.role, text: message.content, createdAt: message.created_at * 1000, serverId: message.id };
+        chatEntries.push(entry);
+        persistActiveChat();
+      }
+    } catch { /* Повторим при следующем цикле опроса. */ }
+  };
+  poll();
+  managerPollTimer = setInterval(poll, 2500);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) startManagerPolling(); });
+
+function fitMessageBubble(node, content) {
+  node.style.width = "";
+  const range = document.createRange();
+  range.selectNodeContents(content);
+  const lines = Array.from(range.getClientRects())
+    .filter((rect) => rect.width > 0);
+  const widestLine = lines.reduce((width, rect) => Math.max(width, rect.width), 0);
+  const lastLine = lines.length ? lines[lines.length - 1].width : 0;
+  node.style.width = `${Math.ceil(Math.max(widestLine, lastLine + 32))}px`;
+}
+
+window.addEventListener("resize", () => {
+  document.querySelectorAll("#log .msg-content").forEach((content) => {
+    fitMessageBubble(content.parentElement, content);
+  });
+});
+
+function add(role, text, persist = true, createdAt = Date.now()) {
   const node = document.createElement("div");
   node.className = "msg " + role;
-  node.textContent = text;
+  const content = document.createElement("span");
+  content.className = "msg-content";
+  content.textContent = text;
+  node.append(content);
+  appendMessageTime(node, createdAt);
   $("log").append(node);
+  fitMessageBubble(node, content);
   node.scrollIntoView();
   if (persist && (role === "user" || role === "assistant")) {
-    chatEntries.push({ role, text: String(text) });
+    chatEntries.push({ role, text: String(text), createdAt });
     persistActiveChat();
   }
 }
@@ -231,13 +304,22 @@ function addProgressively(text, requestId) {
   const node = document.createElement("div");
   node.className = "msg assistant";
   node.setAttribute("aria-live", "off");
+  const content = document.createElement("span");
+  content.className = "msg-content";
+  node.append(content);
   $("log").append(node);
   typewriterMessage = node;
+  typewriterContent = content;
   const fullText = String(text ?? "");
   const characters = Array.from(fullText);
-  typewriterEntry = { role: "assistant", text: fullText };
+  const createdAt = Date.now();
+  typewriterEntry = { role: "assistant", text: fullText, createdAt };
   chatEntries.push(typewriterEntry);
   persistActiveChat();
+  appendMessageTime(node, createdAt);
+  content.textContent = fullText;
+  fitMessageBubble(node, content);
+  content.textContent = "";
 
   return new Promise((resolve) => {
     typewriterResolve = resolve;
@@ -250,6 +332,7 @@ function addProgressively(text, requestId) {
       if (index >= characters.length) {
         node.setAttribute("aria-live", "polite");
         typewriterMessage = null;
+        typewriterContent = null;
         typewriterEntry = null;
         typewriterTimer = null;
         typewriterResolve = null;
@@ -257,7 +340,7 @@ function addProgressively(text, requestId) {
         return;
       }
 
-      node.textContent += characters[index];
+      typewriterContent.textContent += characters[index];
       index += 1;
       if (index === 1 || index % 8 === 0 || index === characters.length) {
         node.scrollIntoView({ block: "nearest" });
@@ -265,6 +348,7 @@ function addProgressively(text, requestId) {
       if (index === characters.length) {
         node.setAttribute("aria-live", "polite");
         typewriterMessage = null;
+        typewriterContent = null;
         typewriterEntry = null;
         typewriterTimer = null;
         typewriterResolve = null;
@@ -324,6 +408,8 @@ async function api(path, body, headers = {}, signal) {
 }
 
 async function newDialog(restoreLast = false) {
+  clearInterval(managerPollTimer);
+  managerPollTimer = null;
   const dialogRequestId = ++activeRequestId;
   activeMessageController?.abort();
   activeMessageController = null;
@@ -341,17 +427,25 @@ async function newDialog(restoreLast = false) {
     if (saved) {
       sessionId = saved.sessionId;
       chatEntries = saved.entries;
-      chatEntries.forEach((entry) => add(entry.role, entry.text, false));
+      managerMessageIds = new Set(saved.managerMessageIds);
+      chatEntries.forEach((entry) => {
+        if (entry.role === "system") {
+          const event = document.createElement("div"); event.className = "system-event"; event.textContent = `— ${entry.text} —`; $("log").append(event);
+        } else add(entry.role, entry.text, false, entry.createdAt);
+      });
       if (!chatEntries.some((entry) => entry.role === "user")) showWelcome();
       persistActiveChat();
+      startManagerPolling();
       return;
     }
 
     const createdSessionId = (await api("/api/sessions")).id;
     if (dialogRequestId !== activeRequestId) return;
     sessionId = createdSessionId;
+    managerMessageIds = new Set();
     persistActiveChat();
     showWelcome();
+    startManagerPolling();
   } finally {
     if (dialogRequestId === activeRequestId) $("submit").disabled = false;
   }
@@ -391,6 +485,7 @@ $("send").addEventListener("submit", async (event) => {
     const reply = await api(`/api/sessions/${sessionId}/messages`, { text }, headers, controller.signal);
     if (requestId !== activeRequestId) return;
     clearWaiting();
+    if (reply.manager_active) return;
     $("cancel").disabled = true;
     await addProgressively(reply.text, requestId);
     if (requestId !== activeRequestId) return;
