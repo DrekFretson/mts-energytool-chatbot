@@ -13,6 +13,7 @@ services:
       EMB_API_KEY: ${EMB_API_KEY:-}
       RERANKER_MODEL: ${RERANKER_MODEL:-qwen/qwen3-reranker-8b}
       DEBUG_TOKEN: ${DEBUG_TOKEN:-}
+      EMBED_ORIGINS: ${EMBED_ORIGINS:-https://energytool.mts.ru}
       DB_PATH: /data/app.sqlite
       KB_PATH: /kb/knowledge-base.zip
     volumes:

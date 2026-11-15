@@ -9,6 +9,8 @@ import config
 COLUMNS = re.compile(r"^\s*-+(?: +-+)+\s*$")
 RULE = re.compile(r"^\s*-{5,}\s*$")
 HEADING = re.compile(r"^(#{1,3}) +(.+?)\s*$")
+# Заголовок, который при выгрузке потерял перенос строки и был экранирован: "...текст. \## Заголовок".
+GLUED_HEADING = re.compile(r"[ \t]*\\(#{1,3} )")
 
 
 def _cells(block, spans):
@@ -81,17 +83,27 @@ def _split_long(text, limit):
     return parts
 
 
+def dashes(text):
+    """Тире из pandoc-записи: '5--15%' -> '5–15%', 'диапазон --- 15' -> 'диапазон — 15'.
+
+    Дефисы в словах и маркеры списков '- ' не трогаются. Вызывать после разбора таблиц:
+    строки-рамки из дефисов распознаются до замены.
+    """
+    return text.replace("---", "—").replace("--", "–")
+
+
 def split_sections(name, text):
     """Режет по H1-H3. Крошка H1 > H2 > H3 различает одинаковые разделы "Чего утверждать нельзя"."""
     path, body, sections = {}, [], []
 
     def flush():
-        content = "\n".join(body).strip()
+        content = dashes("\n".join(body).strip())
         body.clear()
         if content:
-            crumb = " > ".join(path[level] for level in sorted(path)) or PurePosixPath(name).stem
+            crumb = dashes(" > ".join(path[level] for level in sorted(path)) or PurePosixPath(name).stem)
             sections.append((crumb, content))
 
+    text = GLUED_HEADING.sub(lambda m: "\n\n" + m[1], text)
     for line in normalize_tables(text).split("\n"):
         match = HEADING.match(line)
         if match:
