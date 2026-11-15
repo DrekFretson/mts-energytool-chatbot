@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>МТС EnergyTool: демонстрация чата на сайте</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #1d2023; }
+  header { background: #fff; border-bottom: 1px solid #e2e4e8; }
+  .bar { max-width: 1040px; margin: 0 auto; padding: 14px 20px; display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: center; }
+  .logo { font-weight: 700; font-size: 20px; }
+  .logo span { color: #e30611; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px 22px; color: #4d5560; font-size: 15px; }
+  main { max-width: 1040px; margin: 0 auto; padding: 28px 20px 120px; }
+  .note { display: inline-block; padding: 4px 10px; border-radius: 12px; background: #fff1f1; color: #97000a; font-size: 13px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 14px 0 10px; }
+  .lead { max-width: 720px; color: #4d5560; margin: 0 0 26px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .card { background: #fff; border: 1px solid #e2e4e8; border-radius: 12px; padding: 16px 18px; }
+  .card h2 { font-size: 17px; margin: 0 0 6px; }
+  .card p { margin: 0; color: #4d5560; font-size: 15px; }
+  section { margin-top: 30px; background: #fff; border: 1px solid #e2e4e8; border-radius: 12px; padding: 18px 20px; }
+  section h2 { font-size: 18px; margin: 0 0 10px; }
+  section ul { margin: 0; padding-left: 20px; }
+  section li { margin: 4px 0; }
+  a { color: #97000a; }
+  code { display: block; margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: #f4f5f7; font: 14px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="logo"><span>МТС</span> EnergyTool</div>
+    <nav aria-label="Разделы сайта">
+      <span>Учёт энергоресурсов</span><span>Оптовый рынок</span><span>Солнечные панели</span><span>Коммерческие потери</span>
+    </nav>
+  </div>
+</header>
+<main>
+  <span class="note">Демонстрационная страница, не сайт МТС</span>
+  <h1>Так чат-консультант выглядит на сайте EnergyTool</h1>
+  <p class="lead">Консультант открывается кнопкой в правом нижнем углу. Он выясняет задачу, подбирает решение по базе знаний, показывает ссылки на страницы сайта и передаёт заявку менеджеру вместе с резюме диалога.</p>
+  <div class="cards">
+    <div class="card"><h2>Учёт энергоресурсов</h2><p>Облачная платформа и умные счётчики для сбора показаний с объектов.</p></div>
+    <div class="card"><h2>Выход на оптовый рынок</h2><p>Сопровождение предприятий с присоединённой мощностью от 750 кВт.</p></div>
+    <div class="card"><h2>Солнечные электростанции</h2><p>Сетевые, гибридные и автономные станции для бизнеса.</p></div>
+    <div class="card"><h2>Поиск коммерческих потерь</h2><p>Список приоритетных проверок для сетевых и сбытовых компаний.</p></div>
+  </div>
+  <section>
+    <h2>Для проверки</h2>
+    <ul>
+      <li><a href="/chat">Чат на всю страницу</a> с режимом отладки: время ответа и документы базы знаний.</li>
+      <li><a href="/admin">История диалогов</a>: все сессии, в том числе без заявки.</li>
+      <li><a href="/manager">Кабинет менеджера</a>: очередь заявок, резюме диалога, переписка с клиентом.</li>
+    </ul>
+  </section>
+  <section>
+    <h2>Как встроить чат в сайт</h2>
+    <p>Одна строка перед закрывающим тегом body. Чат загружается во фрейме при первом открытии и не влияет на скорость страницы.</p>
+    <code id="snippet"></code>
+  </section>
+</main>
+<script>
+  document.getElementById("snippet").textContent = `<script src="${location.origin}/widget.js" defer><\/script>`;
+</script>
+<script src="/widget.js" data-open="true" data-debug="true" defer></script>
+</body>
+</html>

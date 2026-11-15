@@ -142,6 +142,52 @@ class Budget(unittest.TestCase):
         self.assertEqual(seen, expected)
         self.assertTrue(llm._reasoning)  # reasoning switches are kept
 
+    def test_token_cap_from_one_long_prompt_does_not_stick(self):
+        seen = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body["max_tokens"])
+            if "длинный" in body["messages"][0]["content"] and body["max_tokens"] > 1024:
+                return httpx.Response(400, json={"error": "max_tokens is too large for the context window"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Да."}, "finish_reason": "stop"}]})
+        self.mock(handler)
+        llm._limits.clear()
+        saved, llm.config.MAX_ANSWER_TOKENS = llm.config.MAX_ANSWER_TOKENS, 4096
+        try:
+            llm.chat([{"role": "user", "content": "длинный"}])
+            llm.chat([{"role": "user", "content": "обычный"}])
+            llm.chat([{"role": "user", "content": "обычный"}])
+        finally:
+            llm.config.MAX_ANSWER_TOKENS = saved
+            llm._limits.clear()
+        self.assertEqual(seen, [4096, 2048, 1024, 2048, 4096])
+
+    def test_reranker_falls_back_to_smaller_requests_and_orders_by_score(self):
+        seen = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append((len(body["documents"]), body["top_n"]))
+            if len(body["documents"]) > self.accepts:
+                return httpx.Response(422, json={"detail": "too many documents"})
+            if body["top_n"] > 30:
+                return httpx.Response(422, json={"detail": "top_n must be <= 30"})
+            items = [{"index": i, "relevance_score": i / 100} for i in range(body["top_n"])]
+            return httpx.Response(200, json={"results": items})
+        self.mock(handler)
+        documents = [str(i) for i in range(40)]
+        self.accepts = 40
+        self.assertEqual(llm.rerank("вопрос", documents), list(range(29, -1, -1)))
+        self.accepts = 20
+        self.assertEqual(llm.rerank("вопрос", documents), list(range(19, -1, -1)))
+        self.assertEqual(seen, [(40, 40), (40, 30), (40, 40), (40, 30), (20, 20)])
+
+    def test_short_embedding_reply_is_an_error(self):
+        self.mock(lambda request: httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0, 0.0]}]}))
+        with self.assertRaises(ValueError):
+            llm.embed(["а", "б"])
+
     def test_backoff_has_jitter(self):
         values = {round(llm._backoff(1, httpx.ConnectError("x")), 3) for _ in range(20)}
         self.assertGreater(len(values), 10)
@@ -192,6 +238,42 @@ class StartupEmbedding(unittest.TestCase):
         index = retrieval.Index(chunks)
         self.assertIsNotNone(index.vectors)
         self.assertEqual(len(calls), 2)
+
+    def test_proxy_not_ready_at_start_is_waited_out(self):
+        chunks = [{"id": i, "section": i, "file": "a.md", "crumb": f"A > {i}", "text": f"текст {i}"} for i in range(5)]
+        calls, pauses = [], []
+
+        def waking(texts, batch_size=32):
+            calls.append(batch_size)
+            if len(calls) < 4:
+                raise httpx.ConnectError("not ready")
+            return np.eye(len(texts), 16, dtype=np.float32)
+        llm.embed = waking
+        saved, retrieval.time.sleep = retrieval.time.sleep, pauses.append
+        try:
+            index = retrieval.Index(chunks)
+        finally:
+            retrieval.time.sleep = saved
+        self.assertIsNotNone(index.vectors)
+        self.assertEqual(calls, [32, 8, 8, 8])
+        self.assertEqual(pauses, [0, 10, 20])
+
+    def test_missing_embedding_endpoint_is_not_waited_for(self):
+        chunks = [{"id": i, "section": i, "file": "a.md", "crumb": f"A > {i}", "text": f"текст {i}"} for i in range(5)]
+        calls, pauses = [], []
+
+        def absent(texts, batch_size=32):
+            calls.append(batch_size)
+            request = httpx.Request("POST", "http://proxy.test/v1/embeddings")
+            raise httpx.HTTPStatusError("нет адреса", request=request, response=httpx.Response(404, request=request))
+        llm.embed = absent
+        saved, retrieval.time.sleep = retrieval.time.sleep, pauses.append
+        try:
+            index = retrieval.Index(chunks)
+        finally:
+            retrieval.time.sleep = saved
+        self.assertIsNone(index.vectors)
+        self.assertEqual((calls, pauses), ([32, 8], [0]))
 
 
 class RerankPause(unittest.TestCase):

@@ -118,7 +118,7 @@
 
 			function item(tag,text,cls){const e=document.createElement(tag);e.textContent=text??"";if(cls)e.className=cls;return e}
 
-			function formatSummary(text){return String(text??"").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm,"$1: ")}
+			function formatSummary(text){return String(text??"").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Что консультант рекомендовал \(продукты EnergyTool и почему\)|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm,"$1: ")}
 
 			async function loadList(){try{const rows=await request(queueMode?"/api/manager/queue":"/api/manager/active");$("list").replaceChildren();$("list-title").textContent=`${queueMode?"Новые заявки":"Активные чаты"} (${rows.length})`;$("queue").textContent=queueMode?"Активные чаты":"Новые заявки";for(const x of rows){const b=item("button","","card"+(x.session_id===current?" selected":""));b.type="button";let preview=x.content||x.last_message||x.summary||"";if(preview.length>43)preview=preview.slice(0,40)+"...";b.append(item("strong",x.name||x.session_id),item("span",preview,"preview"),item("small",time(x.last_message_at||x.created_at),"stamp"));b.onclick=()=>queueMode?showLead(x):selectChat(x.session_id);$("list").append(b)}}catch(e){$("notice").textContent=e.message}}
 

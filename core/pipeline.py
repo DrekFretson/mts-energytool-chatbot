@@ -53,9 +53,8 @@ def query_texts(history):
     return [history[-1]["content"]] + [turn["content"] for turn in history[:-1] if turn["role"] == "user"]
 
 
-def answer(index, history, note=""):
-    """note - дополнение к правилам от вызывающего канала (веб-чат сообщает про форму заявки)."""
-    started = time.perf_counter()
+def _prepare(index, history, note):
+    """Поиск и сборка запроса к модели: (отложенный маршрут, разделы, материалы, сообщения)."""
     # Маршрут считается параллельно и ответ не ждёт: к концу генерации он уже готов.
     pending = _pool.submit(router.classify, history) if config.ROUTER == "parallel" else None
     question, *past = query_texts(history)
@@ -63,17 +62,17 @@ def answer(index, history, note=""):
     recent = "\n".join(f"{'Клиент' if turn['role'] == 'user' else 'Консультант'}: {turn['content']}" for turn in history[-4:])
     hits = index.search(question, past, recent)
     hits = index.context(hits) if config.WHOLE_SECTIONS else hits[: config.TOP_K]
-    searched = time.perf_counter()
 
     materials = format_materials(hits)
     recap = recent.rsplit("\n", 1)[0] if config.DIALOG_RECAP and len(history) > 1 else ""
     messages = history[:-1] + [{"role": "user", "content": prompts.user_turn(materials, question, recap)}]
     system = f"{prompts.SYSTEM}\n\n{note}" if note else prompts.SYSTEM
-    text = _clean(llm.chat([{"role": "system", "content": system}] + messages))
+    return pending, hits, materials, [{"role": "system", "content": system}] + messages
+
+
+def _result(text, pending, hits, materials, history, started, searched):
     finished = time.perf_counter()
-
     route = pending.result() if pending else None
-
     known = set(NUMBER.findall(materials + " ".join(turn["content"] for turn in history)))
     return {
         "text": text,
@@ -88,6 +87,36 @@ def answer(index, history, note=""):
         },
         "unverified_numbers": sorted(set(NUMBER.findall(text)) - known),
     }
+
+
+def answer(index, history, note=""):
+    """note - дополнение к правилам от вызывающего канала (веб-чат сообщает про форму заявки)."""
+    started = time.perf_counter()
+    pending, hits, materials, messages = _prepare(index, history, note)
+    searched = time.perf_counter()
+    text = _clean(llm.chat(messages))
+    return _result(text, pending, hits, materials, history, started, searched)
+
+
+def answer_stream(index, history, note="", stop=None):
+    """answer() по мере готовности: ('searched', None), ('thinking', None), ('text', кусок), в конце ('done', результат).
+
+    Текст в результате очищен целиком, как в answer(): им заменяют показанные куски.
+    stop - функция без аргументов: вернула True - клиент ушёл, генерация останавливается.
+    """
+    started = time.perf_counter()
+    pending, hits, materials, messages = _prepare(index, history, note)
+    searched = time.perf_counter()
+    yield "searched", None
+    pieces, first = [], None
+    for kind, piece in llm.chat_stream(messages, stop=stop):
+        if kind == "text":
+            first = first or time.perf_counter()
+            pieces.append(piece)
+        yield kind, piece or None
+    result = _result(_clean("".join(pieces)), pending, hits, materials, history, started, searched)
+    result["timings"]["first_token_ms"] = round(((first or time.perf_counter()) - started) * 1000)
+    yield "done", result
 
 
 def summarize(history):

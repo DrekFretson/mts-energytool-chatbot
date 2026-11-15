@@ -28,10 +28,15 @@ API_KEY = _env("LLM_API_KEY", "OPENAI_API_KEY", default="not-needed")
 # На платформе один прокси на всё; на стенде генерация по API, а bge-m3 локально.
 EMB_BASE_URL = _env("EMB_BASE_URL", default=BASE_URL).rstrip("/")
 EMB_API_KEY = _env("EMB_API_KEY", "EMBEDDER_API_KEY", default=API_KEY)
+# Платформа может выдать реранкеру отдельный ключ (README примера организаторов); без него реранк молча отваливается.
+RERANK_API_KEY = _env("RERANK_API_KEY", "RERANKER_API_KEY", default=API_KEY)
 MODEL = _env("LLM_MODEL", "GEN_MODEL", "OPENAI_MODEL", default="qwen/qwen3.8-27b")
 EMB_MODEL = _env("EMB_MODEL", default="baai/bge-m3")
 RERANKER_MODEL = _env("RERANKER_MODEL", default="qwen/qwen3-reranker-8b")
-MAX_TOKENS = int(_env("MAX_TOKENS", default="2048"))
+try:
+    MAX_TOKENS = max(128, min(8192, int(_env("MAX_TOKENS", default="2048"))))
+except ValueError:
+    MAX_TOKENS = 2048
 # Только для стенда на OpenRouter: провайдеры отличаются квантизацией, фиксируем один, например deepinfra/bf16.
 LLM_PROVIDER = _env("LLM_PROVIDER")
 
@@ -120,6 +125,10 @@ def chat_body(messages, max_tokens=None):
         "max_tokens": max_tokens or config.MAX_ANSWER_TOKENS,
         **_reasoning,
     }
+    if config.TOP_P is not None and "top_p" not in _rejected:
+        body["top_p"] = config.TOP_P
+    if not _reasons(body):
+        _greedy(body)
     if "openrouter.ai" in BASE_URL and LLM_PROVIDER:
         body["provider"] = {"order": LLM_PROVIDER.split(","), "allow_fallbacks": False}
     return body
@@ -127,6 +136,13 @@ def chat_body(messages, max_tokens=None):
 
 _limits = {}  # потолок max_tokens, который принял прокси (узнаём по отказу)
 _OFF = {"reasoning": {"effort": "none"}, "reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}}
+_rejected = set()  # необязательные поля выборки, которые прокси отверг: больше не отправляем
+
+
+def _greedy(body):
+    """Выборка задаётся для режима рассуждений; без рассуждений ответ детерминированный, как на всех замерах."""
+    body["temperature"] = 0.0
+    body.pop("top_p", None)
 
 
 def _reasons(body):
@@ -135,26 +151,40 @@ def _reasons(body):
 
 
 def _post_chat(body):
+    wanted = body["max_tokens"]
+    limit = _limits.get("max_tokens")  # другой поток может убрать запись между проверкой и чтением
+    if limit:
+        # Потолок мог появиться из-за одного длинного промпта, а не правила прокси: каждый запрос пробует вдвое больше.
+        body["max_tokens"] = min(wanted, limit * 2)
     while True:
-        if "max_tokens" in _limits:
-            body["max_tokens"] = min(body["max_tokens"], _limits["max_tokens"])
         try:
             # Повторы ограничены сроком вопроса (set_deadline), а не числом попыток.
-            return _post("/chat/completions", body, attempts=3, retry_timeout=not _reasons(body))
+            result = _post("/chat/completions", body, attempts=3, retry_timeout=not _reasons(body))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (400, 422) and "max_tokens" in exc.response.text:
                 if body["max_tokens"] <= 64:
                     raise
-                # Прокси ограничивает длину ответа: уменьшаем лимит и запоминаем, а не теряем поля рассуждений.
-                _limits["max_tokens"] = min(_limits.get("max_tokens", body["max_tokens"]), body["max_tokens"] // 2)
+                # Прокси ограничивает длину ответа: уменьшаем лимит, а не теряем поля рассуждений.
+                body["max_tokens"] //= 2
                 continue
-            sent = [key for key in _OFF if key in body]
+            sent = [key for key in ("top_p", *_OFF) if key in body]
             if exc.response.status_code not in (400, 422) or not sent:
                 raise
             named = [key for key in sent if key in exc.response.text]
             for key in named or sent[:1]:
-                _reasoning.pop(key, None)
+                # Запоминаем только поле, которое прокси назвал: безымянная ошибка одного запроса
+                # (например, переполнение контекста) не должна менять остальные вопросы прогона.
+                if named and key == "top_p":
+                    _rejected.add(key)
+                elif named:
+                    _reasoning.pop(key, None)
                 body.pop(key)
+            continue
+        if body["max_tokens"] < wanted:
+            _limits["max_tokens"] = body["max_tokens"]
+        else:
+            _limits.pop("max_tokens", None)
+        return result
 
 
 def _answer(result):
@@ -182,8 +212,8 @@ def chat(messages, max_tokens=None):
     body = chat_body(messages, max_tokens)
     try:
         text, cut = _answer(_post_chat(body))
-        if (not text or cut) and body["max_tokens"] < MAX_TOKENS:
-            # Рассуждения или длина съели лимит: повторяем один раз с запасом.
+        if (not text or cut) and body["max_tokens"] < MAX_TOKENS and _limits.get("max_tokens") != body["max_tokens"]:
+            # Рассуждения или длина съели лимит: повторяем один раз с запасом (если прокси сам не держит нас на этом лимите).
             body["max_tokens"] = MAX_TOKENS
             text, cut = _answer(_post_chat(body))
     except httpx.TimeoutException:
@@ -194,12 +224,95 @@ def chat(messages, max_tokens=None):
     if (not text or cut) and _reasons(body):
         # Рассуждения не уложились в лимит: последний шанс - тот же запрос без рассуждений, а не заглушка.
         body.update({key: _OFF[key] for key in body if key in _OFF})
+        _greedy(body)
         body["max_tokens"] = config.MAX_ANSWER_TOKENS_OFF
         text, cut = _answer(_post_chat(body))
     if not text or cut:
         # Обрезанный текст - это рассуждение без тегов или половина фразы, а не ответ.
         raise ValueError("LLM вернула пустой или обрезанный ответ")
     return text
+
+
+def _stream(body, stop=None):
+    """Куски ответа из потока прокси: ('thinking', '') на первом куске рассуждений, затем ('text', кусок).
+
+    stop - функция без аргументов: вернула True - читать дальше не нужно (клиент ушёл), поток закрывается.
+    """
+    left = _remaining()
+    if left is not None and left <= 0.5:
+        raise BudgetExceeded("срок задачи истёк до запроса /chat/completions")
+    timeout = config.LLM_TIMEOUT if left is None else min(config.LLM_TIMEOUT, left)
+    thinking = ended = False
+    # Без парсера рассуждений прокси отдаёт их в content до "</think>": такой текст придерживаем, пока не станет ясно, где ответ.
+    separate, held = not _reasons(body), ""
+    with _client.stream("POST", BASE_URL + "/chat/completions", headers={"Authorization": f"Bearer {API_KEY}"},
+                        json=body, timeout=timeout) as response:
+        response.raise_for_status()
+        if "text/event-stream" not in response.headers.get("content-type", ""):
+            # Прокси не умеет stream и ответил целиком: берём этот ответ, а не генерируем второй раз.
+            response.read()
+            text, cut = _answer(response.json())
+            if cut:
+                raise ValueError("LLM вернула обрезанный ответ")
+            if text:
+                yield "text", text
+            return
+        for line in response.iter_lines():
+            if stop and stop():
+                return
+            # Тайм-аут httpx действует на каждое чтение: медленно капающий поток иначе пережил бы срок ответа.
+            if (_remaining() or 1) <= 0:
+                raise BudgetExceeded("срок задачи истёк во время потока")
+            if not line.startswith("data:"):
+                continue
+            if line[5:].strip() == "[DONE]":
+                ended = True
+                continue
+            chunk = json.loads(line[5:])
+            if chunk.get("error"):
+                raise ValueError("прокси прервал поток ошибкой")
+            choices = chunk.get("choices") or [{}]
+            delta = choices[0].get("delta") or {}
+            if delta.get("reasoning_content") or delta.get("reasoning"):
+                separate = True
+                if not thinking:
+                    thinking = True
+                    yield "thinking", ""
+            piece = delta.get("content") or ""
+            if piece and separate:
+                yield "text", piece
+            elif piece:
+                held += piece
+                if "</think>" in held:
+                    separate, piece = True, held.split("</think>", 1)[1].lstrip()
+                    if piece:
+                        yield "text", piece
+            if choices[0].get("finish_reason") == "length":
+                raise ValueError("LLM вернула обрезанный ответ")
+            ended = ended or bool(choices[0].get("finish_reason"))
+    if not ended:
+        # Соединение закрылось без признака конца: текст оборван на полуслове, полным ответом его считать нельзя.
+        raise ValueError("поток ответа оборвался")
+    if held and "</think>" not in held and THINK.sub("", held).strip():
+        yield "text", THINK.sub("", held).strip()
+
+
+def chat_stream(messages, max_tokens=None, stop=None):
+    """Ответ по мере генерации: ('thinking', '') пока модель рассуждает, затем ('text', кусок).
+
+    Сбой до первого куска текста (прокси без stream, обрыв, пустой или обрезанный ответ) закрывает обычный chat()
+    со всеми его повторами; после первого куска ошибка уходит вызывающему.
+    """
+    started = False
+    try:
+        for kind, piece in _stream({**chat_body(messages, max_tokens), "stream": True}, stop):
+            started = started or kind == "text"
+            yield kind, piece
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError):
+        if started:
+            raise
+    if not started and not (stop and stop()):
+        yield "text", chat(messages, max_tokens)
 
 
 def reasoning_mode():
@@ -232,6 +345,8 @@ def embed(texts, batch_size=32):
         _budget.deadline = deadline
         data = _post("/embeddings", {"model": EMB_MODEL, "input": batch}, timeout=config.EMB_TIMEOUT,
                      base_url=EMB_BASE_URL, api_key=EMB_API_KEY)["data"]
+        if len(data) != len(batch):
+            raise ValueError("Не все эмбеддинги получены")
         return [item["embedding"] for _, item in sorted(enumerate(data), key=lambda pair: pair[1].get("index", pair[0]))]
 
     batches = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
@@ -244,15 +359,37 @@ def embed(texts, batch_size=32):
     return matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-9)
 
 
+_RERANK_SHAPES = ((None, None), (None, 30), (20, 20))  # (сколько документов, top_n): следующая форма после отказа 4xx
+
+
 def rerank(query, documents):
-    """Индексы documents от лучшего к худшему."""
-    result = _post(
-        "/rerank",
-        {"model": RERANKER_MODEL, "query": query, "documents": documents, "top_n": len(documents)},
-        timeout=config.RERANK_TIMEOUT,
-        attempts=2,
-    )
-    return [int(item["index"]) for item in result.get("results", result.get("data", []))]
+    """Индексы documents от лучшего к худшему; при урезанном запросе - только тех, что вернул реранкер.
+
+    Пример организаторов шлёт до 30 документов с top_n до 30. Если прокси отвергает наши 40, пробуем top_n=30,
+    затем 20 первых документов: иначе реранк молча выключен на весь прогон. Принятая форма не запоминается:
+    отказ мог вызвать один длинный запрос, а повторный отказ 4xx стоит доли секунды.
+    """
+    for count, top in _RERANK_SHAPES:
+        sent = documents[:count] if count else documents
+        try:
+            result = _post(
+                "/rerank",
+                {"model": RERANKER_MODEL, "query": query, "documents": sent, "top_n": min(top or len(sent), len(sent))},
+                timeout=config.RERANK_TIMEOUT,
+                attempts=2,
+                api_key=RERANK_API_KEY,
+                retry_timeout=False,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (400, 413, 422) and (count, top) != _RERANK_SHAPES[-1]:
+                continue
+            raise
+        items = result.get("results", result.get("data", []))
+        scores = [item.get("relevance_score", item.get("score")) for item in items]
+        if items and all(isinstance(score, (int, float)) for score in scores):
+            # Порядок задаёт оценка: прокси может вернуть документы в исходном порядке. Сортировка устойчивая.
+            items = [item for _, item in sorted(zip(scores, items), key=lambda pair: -pair[0])]
+        return [int(item["index"]) for item in items]
 
 
 def _lenient_json(text):
@@ -278,6 +415,7 @@ def chat_json(messages, schema, max_tokens=200, timeout=None):
         body = {**chat_body(messages, max_tokens), "response_format": response_format}
         # Только поля, которые прокси уже принял (лишние _post_chat отсеял на пробе): классификатору рассуждения не нужны.
         body.update({key: _OFF[key] for key in list(body) if key in _OFF})
+        _greedy(body)
         try:
             result = _post("/chat/completions", body, timeout=timeout, attempts=1)
         except httpx.HTTPStatusError as exc:

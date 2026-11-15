@@ -38,6 +38,7 @@ class Reasoning(unittest.TestCase):
 
     def handle(self, request):
         self.seen.append(json.loads(request.content))
+        self.auth = request.headers.get("authorization")
         status, payload = self.script.pop(0)
         if status == "timeout":
             raise httpx.ReadTimeout("slow", request=request)
@@ -59,10 +60,12 @@ class Reasoning(unittest.TestCase):
             self.assertNotIn("reasoning_effort", body)
             self.assertIn("chat_template_kwargs", body)
 
-    def test_error_without_field_name_drops_fields_one_by_one(self):
-        self.script += [(422, {"detail": "bad"}), (422, {"detail": "bad"}), reply("Да.")]
+    def test_error_without_field_name_drops_fields_for_that_request_only(self):
+        self.script += [(422, {"detail": "bad"}), (422, {"detail": "bad"}), reply("Да."), reply("Нет.")]
         self.assertEqual(self.ask(), "Да.")
-        self.assertEqual(len(llm._reasoning), 1)
+        self.assertEqual([sum(key in body for key in FIELDS) for body in self.seen], [3, 2, 1])
+        self.ask()
+        self.assertEqual({key: self.seen[-1][key] for key in FIELDS}, FIELDS)
 
     def test_reasoning_never_returned_as_answer(self):
         self.script.append(reply(THOUGHT + "</think>\n\nДа, можно."))
@@ -77,6 +80,34 @@ class Reasoning(unittest.TestCase):
         self.assertEqual(self.ask(), "Да.")
         self.assertEqual(len(self.seen), 2)
         self.assertEqual(self.seen[1]["reasoning"], {"effort": "none"})
+
+    def test_sampling_goes_only_with_reasoning_and_survives_rejection(self):
+        config = llm.config
+        saved = config.TEMPERATURE, config.TOP_P
+        config.TEMPERATURE, config.TOP_P = 1.0, 0.95
+        try:
+            self.script += [(400, {"error": "Unrecognized request argument: top_p"}), reply("Да."), ("timeout", None), reply("Да.")]
+            self.ask()
+            self.ask()
+        finally:
+            config.TEMPERATURE, config.TOP_P = saved
+            llm._rejected.clear()
+        first, retry, second, plain = self.seen
+        self.assertEqual((first["temperature"], first["top_p"]), (1.0, 0.95))
+        self.assertNotIn("top_p", retry)
+        self.assertEqual({key: retry[key] for key in FIELDS}, FIELDS)
+        self.assertNotIn("top_p", second)
+        self.assertEqual(second["temperature"], 1.0)
+        self.assertEqual(plain["temperature"], 0.0)
+
+    def test_reranker_gets_its_own_key(self):
+        saved, llm.RERANK_API_KEY = llm.RERANK_API_KEY, "rerank-key"
+        try:
+            self.script.append((200, {"results": [{"index": 1}, {"index": 0}]}))
+            self.assertEqual(llm.rerank("вопрос", ["а", "б"]), [1, 0])
+        finally:
+            llm.RERANK_API_KEY = saved
+        self.assertEqual(self.auth, "Bearer rerank-key")
 
     def test_reasoning_mode_raises_limits(self):
         config = llm.config

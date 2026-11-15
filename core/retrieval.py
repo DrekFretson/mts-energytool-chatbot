@@ -4,6 +4,7 @@ import re
 import sys
 import time
 
+import httpx
 import numpy as np
 from rank_bm25 import BM25Okapi
 
@@ -24,7 +25,8 @@ def _document(chunk):
 
 DENSE_PAUSE_AFTER = 3  # подряд упавших эмбеддингов запроса, после которых поиск временно идёт только по BM25
 DENSE_PAUSE_SEC = 60.0
-RERANK_PAUSE_SEC = 60.0  # реранкер, упавший или не уложившийся в тайм-аут 3 раза подряд, не зовём 5 минут
+RERANK_PAUSE_SEC = 60.0  # реранкер, упавший или не уложившийся в тайм-аут 3 раза подряд, не зовём минуту
+STARTUP_EMBED_PAUSES = (0, 10, 20, 30)  # секунды перед повторами эмбеддингов базы на старте
 
 
 class Index:
@@ -45,14 +47,34 @@ class Index:
 
     @staticmethod
     def _embed_twice(texts):
-        """Вторая серия попыток на старте, уже по одной пачке: один отказ прокси или его лимит на параллельные
-        запросы иначе оставляет весь прогон без векторного поиска."""
+        """Эмбеддинги базы на старте. Без них весь прогон идёт на одном BM25, поэтому одного отказа мало:
+        после сбоя пачки идут по одной и мелкие (лимит прокси на параллельные запросы или на размер запроса),
+        затем ещё три попытки с паузами - прокси платформы может быть не готов в первую минуту после запуска."""
         try:
             return llm.embed(texts)
+        except llm.BudgetExceeded:
+            raise
         except Exception as exc:
+            error = exc
             print(f"Эмбеддинги базы: повтор после {type(exc).__name__}", file=sys.stderr)
-            llm.embed_parallel = 1
-            return llm.embed(texts)
+        llm.embed_parallel = 1
+        for pause in STARTUP_EMBED_PAUSES:
+            left = llm._remaining()
+            if left is not None and left < pause + 5:
+                break
+            time.sleep(pause)
+            try:
+                return llm.embed(texts, batch_size=8)
+            except llm.BudgetExceeded:
+                raise
+            except Exception as exc:
+                error = exc
+                print(f"Эмбеддинги базы: повтор после {type(exc).__name__}", file=sys.stderr)
+                status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+                if 400 <= status < 500 and status != 429:
+                    # Отказ по существу (нет такого адреса, не тот ключ): ожидание его не исправит.
+                    break
+        raise error
 
     def _lexical(self, query, past):
         scores = self.bm25.get_scores(tokenize(query))

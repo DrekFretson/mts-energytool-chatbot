@@ -2,12 +2,14 @@
 
 import csv
 import io
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -25,7 +27,10 @@ os.environ.update(LLM_BASE_URL=BASE_URL, LLM_API_KEY="test", DEBUG_TOKEN="secret
 TMP = tempfile.TemporaryDirectory()
 os.environ.update(DB_PATH=f"{TMP.name}/app.sqlite")
 
+import httpx  # noqa: E402
+
 import kb  # noqa: E402
+import llm  # noqa: E402
 import pipeline  # noqa: E402
 import router  # noqa: E402
 
@@ -301,6 +306,11 @@ class Web(unittest.TestCase):
     def tearDownClass(cls):
         cls.client_context.__exit__(None, None, None)
 
+    def setUp(self):
+        from web import app as web_app
+
+        web_app._recent.clear()  # лимит запросов с одного IP проверяет свой тест, остальным он мешать не должен
+
     def session(self):
         return self.client.post("/api/sessions").json()["id"]
 
@@ -325,6 +335,97 @@ class Web(unittest.TestCase):
             after = self.client.post(f"/api/sessions/{sid}/messages", json={"text": "Позовите менеджера"}).json()
         self.assertEqual((after["open_form"], after["offer_lead"]), (False, False))
         self.assertIn("уже отправил заявку", notes[0])
+
+    def events(self, sid, text, **kwargs):
+        with self.client.stream("POST", f"/api/sessions/{sid}/messages/stream", json={"text": text}, **kwargs) as response:
+            self.assertEqual(response.status_code, 200)
+            blocks = [block for block in "".join(response.iter_text()).split("\n\n") if block.startswith("event:")]
+        return [(block.split("\n")[0][7:], json.loads(block.split("\n")[1][5:])) for block in blocks]
+
+    def test_stream_gives_status_then_text_then_the_same_reply(self):
+        sid = self.session()
+        events = self.events(sid, "вопрос [link:solar]", headers={"X-Debug-Token": "secret"})
+        kinds = [kind for kind, _ in events]
+        self.assertEqual(kinds[:2], ["status", "status"])
+        self.assertEqual([data["stage"] for kind, data in events if kind == "status"], ["searched", "thinking"])
+        self.assertEqual(kinds[-1], "done")
+        done = events[-1][1]
+        self.assertEqual("".join(data["text"] for kind, data in events if kind == "delta"), done["text"])
+        self.assertEqual([link["url"] for link in done["links"]], ["https://energytool.mts.ru/solar-panels"])
+        self.assertIn("first_token_ms", done["debug"]["timings"])
+        detail = self.client.get(f"/api/admin/sessions/{sid}", headers={"X-Debug-Token": "secret"}).json()
+        self.assertEqual([m["role"] for m in detail["messages"]], ["user", "assistant"])
+        self.assertEqual(self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вопрос"}).json()["links"], [])
+
+    def test_stream_falls_back_when_proxy_cannot_stream(self):
+        sid = self.session()
+        with mock.patch.object(llm, "_stream", side_effect=httpx.ConnectError("нет потока")):
+            events = self.events(sid, "вопрос")
+        self.assertEqual([kind for kind, _ in events], ["status", "delta", "done"])
+        self.assertIn("fake-llm", events[-1][1]["text"])
+
+    def messages(self, sid):
+        return self.client.get(f"/api/admin/sessions/{sid}", headers={"X-Debug-Token": "secret"}).json()["messages"]
+
+    def test_cancel_stops_the_stream_and_leaves_no_unanswered_message(self):
+        sid = self.session()
+        original = fake_llm.CHAT_DELAY
+        fake_llm.CHAT_DELAY = 3
+        try:
+            reader = threading.Thread(target=self.events, args=(sid, "вопрос"))
+            reader.start()
+            time.sleep(0.7)
+            self.assertEqual(self.client.post(f"/api/sessions/{sid}/cancel").json()["status"], "cancelled")
+            reader.join(timeout=5)
+        finally:
+            fake_llm.CHAT_DELAY = original
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(self.messages(sid), [])
+        self.assertEqual(self.client.post(f"/api/sessions/{sid}/cancel").json()["status"], "idle")
+        self.assertEqual(self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вопрос"}).status_code, 200)
+
+    def test_stream_nobody_reads_is_cleaned_up(self):
+        from web import app as web_app
+
+        sid = self.session()
+        saved, web_app.STREAM_STALE_SEC = web_app.STREAM_STALE_SEC, 0.3
+        try:
+            web_app.send_message_stream(sid, web_app.Message(text="вопрос"), mock.Mock(client=None))
+            for _ in range(50):
+                if not self.messages(sid) and sid not in web_app._busy_sessions:
+                    break
+                time.sleep(0.1)
+        finally:
+            web_app.STREAM_STALE_SEC = saved
+        self.assertEqual(self.messages(sid), [])
+        self.assertNotIn(sid, web_app._busy_sessions)
+
+    def test_manager_takes_the_dialog_and_closes_it(self):
+        sid, token = self.session(), {"X-Debug-Token": "secret"}
+        self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вопрос"})
+        lead = {"name": "Тест Тестов", "phone": "+7 900 000-00-00", "company": "ООО Тест", "consent": True}
+        self.client.post(f"/api/sessions/{sid}/lead", json=lead)
+        self.assertEqual(self.client.post(f"/api/manager/sessions/{sid}/messages", json={"text": "рано"}, headers=token).status_code, 409)
+        self.assertIn(sid, [row["session_id"] for row in self.client.get("/api/manager/queue", headers=token).json()])
+        self.assertEqual(self.client.post(f"/api/manager/leads/{sid}/accept", headers=token).json()["status"], "active")
+        self.assertEqual(self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вы тут?"}).json(), {"manager_active": True})
+        self.assertEqual(self.events(sid, "а так?")[-1], ("done", {"manager_active": True}))
+        self.assertEqual(self.client.post(f"/api/manager/sessions/{sid}/messages", json={"text": "Добрый день"}, headers=token).status_code, 200)
+        seen = self.client.get(f"/api/sessions/{sid}/manager-messages").json()
+        self.assertEqual([m["role"] for m in seen], ["system", "manager"])
+        self.assertEqual(self.client.post(f"/api/manager/sessions/{sid}/close", json={"report": "договорились о звонке"}, headers=token).json()["status"], "closed")
+        self.assertEqual(self.client.post(f"/api/manager/sessions/{sid}/messages", json={"text": "ещё"}, headers=token).status_code, 409)
+        self.assertIn("text", self.client.post(f"/api/sessions/{sid}/messages", json={"text": "спасибо"}).json())
+        detail = self.client.get(f"/api/admin/sessions/{sid}", headers=token).json()
+        self.assertEqual(detail["manager_report"]["report"], "договорились о звонке")
+        self.assertEqual(self.client.get(f"/api/manager/sessions/{sid}").status_code, 403)
+
+    def test_llm_down_says_so_instead_of_blaming_the_materials(self):
+        sid = self.session()
+        with mock.patch.object(pipeline, "answer", side_effect=RuntimeError("нет модели")):
+            reply = self.client.post(f"/api/sessions/{sid}/messages", json={"text": "вопрос"}).json()
+        self.assertIn("временно недоступен", reply["text"])
+        self.assertEqual(reply["links"], [])
 
     def test_operator_route_opens_lead_form(self):
         sid = self.session()
@@ -366,6 +467,13 @@ class Web(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("data/knowledge-base.zip", done.stderr)
         self.assertNotIn("Traceback", done.stderr)
+
+    def test_pages_and_widget_embedding(self):
+        self.assertIn("/widget.js", self.client.get("/").text)
+        self.assertIn("/chat?embed=1", self.client.get("/widget.js").text)
+        chat = self.client.get("/chat")
+        self.assertIn("frame-ancestors 'self' https://energytool.mts.ru", chat.headers["content-security-policy"])
+        self.assertEqual(self.client.get("/admin").headers["content-security-policy"], "frame-ancestors 'none'")
 
     def test_unknown_session(self):
         self.assertEqual(self.client.post("/api/sessions/none/messages", json={"text": "x"}).status_code, 404)
