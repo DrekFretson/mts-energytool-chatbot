@@ -41,6 +41,11 @@
   #detail { margin-top: 22px; }
   #session-list-view[hidden], #detail[hidden], #lead-detail[hidden] { display: none; }
   .back-button { margin-bottom: 8px; }
+  .history-disclosure { margin: 10px 0; }
+  .history-toggle { display: inline-flex; align-items: center; min-height: 30px; padding: 4px 9px; border: 1px solid #c7cdd4; border-radius: 7px; color: #4d5560; font-size: 14px; font-weight: 500; list-style: none; cursor: pointer; }
+  .history-toggle::-webkit-details-marker { display: none; }
+  .history-toggle:hover { border-color: #8d0010; background: #fff4f4; color: #8d0010; }
+  .history-toggle:focus-visible { outline: 3px solid #9b0010; outline-offset: 2px; }
   .conversation { display: grid; gap: 10px; }
   .message { min-width: 0; padding: 10px 12px; border: 1px solid #e0e4e8; border-radius: 9px; background: #fff; }
   .message-head { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 5px; color: #4d5560; font-size: .9rem; }
@@ -95,6 +100,7 @@
           </fieldset>
         </div>
       </div></th>
+      <th scope="col" class="lead-heading"><div id="review-filter-control" class="filter-anchor"><span>Рассмотрена</span><button id="review-filter-trigger" class="filter-trigger" type="button" aria-expanded="false" aria-controls="review-filter-popup" aria-label="Фильтр по рассмотренной заявке" title="Фильтр по рассмотренной заявке"><span aria-hidden="true">▾</span></button><div id="review-filter-popup" class="filter-popup" role="group" aria-label="Фильтр по рассмотренной заявке" hidden><fieldset><label class="filter-option"><input id="review-yes" type="checkbox" checked> Да</label><label class="filter-option"><input id="review-no" type="checkbox" checked> Нет</label></fieldset></div></div></th>
       <th scope="col"><div class="id-heading"><span>ID сессии</span><button id="refresh-sessions" class="refresh-button" type="button" aria-label="Обновить таблицу сессий" title="Обновить таблицу сессий">⭯</button></div></th>
     </tr></thead>
     <tbody id="rows"></tbody>
@@ -104,7 +110,10 @@
 <section id="detail" aria-labelledby="detail-title" hidden>
   <button id="detail-back" class="back-button" type="button">← К списку сессий</button>
   <h2 id="detail-title" tabindex="-1">Переписка</h2>
-  <div id="conversation" class="conversation" aria-live="polite"></div>
+  <details id="history-disclosure" class="history-disclosure">
+    <summary id="history-toggle" class="history-toggle">▼ Открыть историю чата</summary>
+    <div id="conversation" class="conversation" aria-live="polite"></div>
+  </details>
   <section id="lead-detail" class="lead-card" aria-labelledby="lead-heading" hidden></section>
 </section>
 <script>
@@ -133,6 +142,10 @@ function textElement(tag, text, className) {
   element.textContent = text == null ? "" : String(text);
   if (className) element.className = className;
   return element;
+}
+
+function formatSummary(text) {
+  return String(text ?? "").replace(/^(Задача клиента|Объект и данные \(мощность, регион, приборы и т\.п\.\)|Интересующие продукты|Открытые вопросы|Предлагаемый следующий шаг):[ \t]*\r?\n(?![ \t]*\r?\n)/gm, "$1: ");
 }
 
 function parseMeta(raw) {
@@ -207,7 +220,7 @@ function renderMessage(message) {
   article.className = "message";
   const header = document.createElement("div");
   header.className = "message-head";
-  header.append(textElement("strong", message.role === "user" ? "Клиент" : "Консультант"));
+  header.append(textElement("strong", message.role === "user" ? "Клиент" : message.role === "manager" ? "Менеджер" : "Консультант"));
   const timestamp = when(message.created_at);
   if (timestamp) header.append(textElement("time", timestamp));
   article.append(header, textElement("p", message.content, "message-body"));
@@ -235,7 +248,7 @@ function renderLead(lead) {
   panel.append(fields);
 
   if (typeof lead.summary === "string") {
-    panel.append(textElement("h4", "Резюме"), textElement("p", lead.summary, "summary-text"));
+    panel.append(textElement("h4", "Резюме"), textElement("p", formatSummary(lead.summary), "summary-text"));
     const actions = document.createElement("div");
     actions.className = "copy-row";
     const copy = textElement("button", "Скопировать резюме", "copy-button");
@@ -269,12 +282,13 @@ function renderSessions() {
   const search = $("session-search").value.trim().toLocaleLowerCase();
   const visible = sessions.filter((session) => {
     const matchesLead = session.has_lead ? includeWithLead : includeWithoutLead;
-    return matchesLead && String(session.id).toLocaleLowerCase().startsWith(search);
+    const matchesReview = session.reviewed ? $("review-yes").checked : $("review-no").checked;
+    return matchesLead && matchesReview && String(session.id).toLocaleLowerCase().startsWith(search);
   });
   if (!visible.length) {
     const row = document.createElement("tr");
     const cell = textElement("td", "Нет сессий с выбранными фильтрами.");
-    cell.colSpan = 4;
+    cell.colSpan = 5;
     row.append(cell);
     rows.replaceChildren(row);
     return;
@@ -285,6 +299,7 @@ function renderSessions() {
     for (const value of [when(session.created_at), session.messages, session.has_lead ? "Да" : "Нет"]) {
       row.append(textElement("td", value));
     }
+    row.append(textElement("td", session.reviewed ? "Да" : "Нет"));
     const idCell = document.createElement("td");
     const open = textElement("button", session.id, "session-open");
     open.type = "button";
@@ -298,9 +313,11 @@ function renderSessions() {
 
 async function show(id) {
   const requestId = ++activeDetailRequest;
+  $("detail").querySelectorAll(".manager-report").forEach((report) => report.remove());
   $("session-list-view").hidden = true;
   const detail = $("detail");
   const conversation = $("conversation");
+  $("history-disclosure").open = false;
   $("detail-title").textContent = `Переписка — ${id}`;
   detail.hidden = false;
   $("detail-title").focus();
@@ -312,6 +329,13 @@ async function show(id) {
     conversation.replaceChildren(...(Array.isArray(data.messages) ? data.messages : []).map(renderMessage));
     if (!conversation.childElementCount) conversation.append(textElement("p", "В этой сессии нет сообщений."));
     renderLead(data.lead);
+    if (data.manager_report && data.manager_report.report) {
+      const report = document.createElement("section");
+      report.className = "lead-card manager-report";
+      report.dataset.sessionId = id;
+      report.append(textElement("h3", "Отчёт менеджера"), textElement("p", data.manager_report.report, "summary-text"));
+      $("detail").append(report);
+    }
   } catch (error) {
     if (requestId !== activeDetailRequest) return;
     conversation.replaceChildren(textElement("p", error.message, "notice"));
@@ -325,13 +349,22 @@ function returnToList() {
   $("session-search").focus();
 }
 
+$("history-disclosure").addEventListener("toggle", () => {
+  $("history-toggle").textContent = $("history-disclosure").open
+    ? "▲ Закрыть историю чата"
+    : "▼ Открыть историю чата";
+});
+
 $("filter-has-lead").addEventListener("change", renderSessions);
 $("filter-no-lead").addEventListener("change", renderSessions);
 $("session-search").addEventListener("input", renderSessions);
+$("review-yes").addEventListener("change", renderSessions);
+$("review-no").addEventListener("change", renderSessions);
 
-function setFilterOpen(open) {
-  const popup = $("filter-popup");
-  const trigger = $("filter-trigger");
+function setFilterOpen(open, suffix = "") {
+  const prefix = suffix ? "review-filter" : "filter";
+  const popup = $(`${prefix}-popup`);
+  const trigger = $(`${prefix}-trigger`);
   if (open) {
     popup.hidden = false;
     const anchor = trigger.getBoundingClientRect();
@@ -347,23 +380,30 @@ function setFilterOpen(open) {
   trigger.setAttribute("aria-expanded", String(open));
 }
 
-$("filter-trigger").addEventListener("click", () => {
-  setFilterOpen($("filter-popup").hidden);
-});
+for (const suffix of ["", "-review"]) {
+  const popupId = suffix ? `review-filter-popup` : `filter-popup`;
+  const controlId = suffix ? `review-filter-control` : `filter-control`;
+  const triggerId = suffix ? `review-filter-trigger` : `filter-trigger`;
+  $(triggerId).addEventListener("click", () => {
+    const open = $(popupId).hidden;
+    setFilterOpen(false, suffix === "-review" ? "" : "-review");
+    setFilterOpen(open, suffix === "-review" ? "-review" : "");
+  });
+}
+function closeFilters() { setFilterOpen(false); setFilterOpen(false, "-review"); }
 document.addEventListener("click", (event) => {
   if (!(event.target instanceof Node) || !$("filter-control").contains(event.target)) setFilterOpen(false);
+  if (!(event.target instanceof Node) || !$("review-filter-control").contains(event.target)) setFilterOpen(false, "-review");
 });
 document.addEventListener("focusin", (event) => {
   if (!$("filter-popup").hidden && !$("filter-control").contains(event.target)) setFilterOpen(false);
+  if (!$("review-filter-popup").hidden && !$("review-filter-control").contains(event.target)) setFilterOpen(false, "-review");
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("filter-popup").hidden) {
-    setFilterOpen(false);
-    $("filter-trigger").focus();
-  }
+  if (event.key === "Escape") { closeFilters(); }
 });
-document.addEventListener("scroll", () => setFilterOpen(false), true);
-window.addEventListener("resize", () => setFilterOpen(false));
+document.addEventListener("scroll", closeFilters, true);
+window.addEventListener("resize", closeFilters);
 
 async function refreshSessions() {
   if (sessionsLoading) return;
