@@ -24,7 +24,7 @@ def _document(chunk):
 
 DENSE_PAUSE_AFTER = 3  # подряд упавших эмбеддингов запроса, после которых поиск временно идёт только по BM25
 DENSE_PAUSE_SEC = 60.0
-RERANK_PAUSE_SEC = 60.0  # реранкер, упавший или не уложившийся в тайм-аут 3 раза подряд, не зовём 5 минут
+RERANK_PAUSE_SEC = 300.0  # реранкер, упавший или не уложившийся в тайм-аут 3 раза подряд, не зовём 5 минут
 
 
 class Index:
@@ -32,27 +32,15 @@ class Index:
         self.chunks = chunks
         self._dense_failures, self._dense_paused_until = 0, 0.0
         self._rerank_failures, self._rerank_paused_until = 0, 0.0
-        self._queries = {}
         documents = [_document(chunk) for chunk in chunks]
         self.bm25 = BM25Okapi([tokenize(document) for document in documents])
         try:
-            vectors = self._embed_twice(documents + list(config.ASPECT_QUERIES))
+            vectors = llm.embed(documents + list(config.ASPECT_QUERIES))
             self.vectors = vectors[: len(documents)]
             self.aspects = self.vectors @ vectors[len(documents) :].T
         except Exception as exc:
             print(f"Эмбеддинги недоступны, только BM25: {type(exc).__name__}", file=sys.stderr)
             self.vectors = None
-
-    @staticmethod
-    def _embed_twice(texts):
-        """Вторая серия попыток на старте, уже по одной пачке: один отказ прокси или его лимит на параллельные
-        запросы иначе оставляет весь прогон без векторного поиска."""
-        try:
-            return llm.embed(texts)
-        except Exception as exc:
-            print(f"Эмбеддинги базы: повтор после {type(exc).__name__}", file=sys.stderr)
-            llm.embed_parallel = 1
-            return llm.embed(texts)
 
     def _lexical(self, query, past):
         scores = self.bm25.get_scores(tokenize(query))
@@ -61,22 +49,8 @@ class Index:
         top = scores.max()
         return scores / top if top > 0 else scores
 
-    def prefetch(self, texts):
-        """Эмбеддинги текстов запросов заранее, пачками; при сбое каждый вопрос получает свои сам, как без prefetch."""
-        if self.vectors is None:
-            return
-        texts = list(dict.fromkeys(texts))
-        try:
-            self._queries = dict(zip(texts, llm.embed(texts)))
-        except Exception as exc:
-            print(f"Эмбеддинги запросов заранее не получены: {type(exc).__name__}", file=sys.stderr)
-
     def _dense(self, query, past):
-        texts = [query] + past
-        if all(text in self._queries for text in texts):
-            vectors = np.stack([self._queries[text] for text in texts])
-        else:
-            vectors = llm.embed(texts)
+        vectors = llm.embed([query] + past)
         query_vector = vectors[0] + config.HISTORY_WEIGHT_DENSE * vectors[1:].sum(axis=0)
         return self.vectors @ (query_vector / np.linalg.norm(query_vector))
 
@@ -166,20 +140,10 @@ class Index:
         for number, section in sections.items():
             by_file.setdefault(section["file"], []).append(number)
 
-        # Целиком идут документы с лучшей оценкой поиска, остальные - только найденными разделами.
-        # 0 - без ограничения: любой найденный документ тянется целиком, пока хватает бюджета.
-        whole_files = None
-        if config.WHOLE_DOCUMENTS_LIMIT:
-            best = {}
-            for hit in hits:
-                best[hit["file"]] = max(best.get(hit["file"], hit["score"]), hit["score"])
-            whole_files = set(sorted(best, key=best.get, reverse=True)[: config.WHOLE_DOCUMENTS_LIMIT])
-
         for hit in hits:
             new_file = all(sections[n]["file"] != hit["file"] for n in chosen)
             rest = [n for n in by_file[hit["file"]] if n not in chosen]
-            whole = config.WHOLE_DOCUMENTS and (whole_files is None or hit["file"] in whole_files)
-            if whole and used + sum(len(part) for n in rest for part in sections[n]["parts"]) <= config.CONTEXT_CHARS:
+            if config.WHOLE_DOCUMENTS and used + sum(len(part) for n in rest for part in sections[n]["parts"]) <= config.CONTEXT_CHARS:
                 for number in rest:
                     take(number, hit["score"])
             take(hit["section"], hit["score"])

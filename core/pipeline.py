@@ -48,17 +48,13 @@ def format_materials(hits):
     return "\n\n".join(f'<document title="{title}">\n' + "\n\n".join(parts) + "\n</document>" for (_, title), parts in groups)
 
 
-def query_texts(history):
-    """Тексты, по которым ищется ответ: последняя реплика и прошлые реплики клиента."""
-    return [history[-1]["content"]] + [turn["content"] for turn in history[:-1] if turn["role"] == "user"]
-
-
 def answer(index, history, note=""):
     """note - дополнение к правилам от вызывающего канала (веб-чат сообщает про форму заявки)."""
     started = time.perf_counter()
     # Маршрут считается параллельно и ответ не ждёт: к концу генерации он уже готов.
     pending = _pool.submit(router.classify, history) if config.ROUTER == "parallel" else None
-    question, *past = query_texts(history)
+    question = history[-1]["content"]
+    past = [turn["content"] for turn in history[:-1] if turn["role"] == "user"]
 
     recent = "\n".join(f"{'Клиент' if turn['role'] == 'user' else 'Консультант'}: {turn['content']}" for turn in history[-4:])
     hits = index.search(question, past, recent)

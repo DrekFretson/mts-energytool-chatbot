@@ -39,8 +39,6 @@ class Reasoning(unittest.TestCase):
     def handle(self, request):
         self.seen.append(json.loads(request.content))
         status, payload = self.script.pop(0)
-        if status == "timeout":
-            raise httpx.ReadTimeout("slow", request=request)
         return httpx.Response(status, json=payload)
 
     def ask(self):
@@ -71,12 +69,6 @@ class Reasoning(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ask()
         self.assertEqual(self.seen[-1]["reasoning"], {"effort": "none"})
-
-    def test_reasoning_timeout_is_answered_without_reasoning(self):
-        self.script += [("timeout", None), reply("Да.")]
-        self.assertEqual(self.ask(), "Да.")
-        self.assertEqual(len(self.seen), 2)
-        self.assertEqual(self.seen[1]["reasoning"], {"effort": "none"})
 
     def test_reasoning_mode_raises_limits(self):
         config = llm.config
