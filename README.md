@@ -129,7 +129,7 @@ python build_zip.py V7-think 'WHOLE_DOCUMENTS=False' 'CONTEXT_CHARS=14000' 'DIAL
 DATA_DIR=data PYTHONPATH=core .venv/bin/python core/solution.py && .venv/bin/python eval/report.py submission.csv data/demo_output.csv
 ```
 
-План сабмитов: [research.md](research.md).
+Подробности архитектуры и экспериментов: [сводка исследования](docs/RESEARCH_SUMMARY.md), [описание решения](docs/SOLUTION.md), [архитектура](docs/ARCHITECTURE_V9.md).
 
 ## Встраивание в сайт EnergyTool и передача заявок
 
